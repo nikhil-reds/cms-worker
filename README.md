@@ -1,98 +1,242 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Rubenius Background Worker Service (`cms-worker`)
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+The `cms-worker` is a headless, event-driven NestJS service responsible for executing all resource-intensive, asynchronous, and scheduled tasks in the Rubenius Digital Signage Platform. By offloading these workflows from the main client-facing APIs, the platform remains highly responsive even under heavy device loads.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## 1. System Architecture
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+The worker service sits in the background, continuously listening for events on **Redis BullMQ** and polling batch telemetry logs from **AWS SQS**.
 
-## Project setup
+```mermaid
+graph TD
+    %% Queues & Ingestion
+    Redis[(Redis Cluster)] <-->|BullMQ Jobs| Worker[NestJS Worker Service]
+    SQS[AWS SQS Queues] -->|Durable Events| Worker
+    
+    %% Worker Internal Processors
+    subgraph Worker [NestJS Worker Service]
+        MP[Manifest Processor]
+        AP[Analytics Processor]
+        MTrans[Media Transcoding Processor]
+        SchedP[Scheduler Processor]
+        NotifP[Notification Processor]
+    end
 
-```bash
-$ npm install
+    %% External Systems
+    Worker -->|ORM Queries| PG[(PostgreSQL RDS)]
+    Worker -->|Batch SQL Writes| TS[(TimescaleDB)]
+    Worker -->|Upload Manifests| S3[(AWS S3)]
+    Worker -->|Invalidate Manifests| CF[AWS CloudFront]
+    Worker -->|Triggers Transcodes| MC[AWS MediaConvert]
+    Worker -->|Sends Emails| SES[AWS SES]
 ```
 
-## Compile and run the project
+---
 
+## 2. Dynamic Communication Flow
+
+The worker orchestrates data flow between the Next.js CMS frontend and the edge-based physical BrightSign players.
+
+### Loop A: CMS $\rightarrow$ API $\rightarrow$ Worker
+How a tenant's dashboard changes are sent to the background worker.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Tenant as Next.js CMS Frontend
+    participant API as NestJS API
+    participant DB as PostgreSQL DB
+    participant Redis as Redis (BullMQ Queue)
+    participant Worker as cms-worker
+
+    Tenant->>API: Publish schedule changes / drag-and-drop playlist
+    API->>DB: Save updated relations in DB
+    API->>Redis: Enqueue 'generate-manifest' job payload
+    API-->>Tenant: Return success confirmation
+    Redis->>Worker: Pull 'generate-manifest' job
+    Worker->>Worker: Start manifest generation workflow...
+```
+
+### Loop B: Worker $\rightarrow$ CloudFront $\rightarrow$ Media Player
+How the worker publishes manifests and alerts the edge players.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Worker as cms-worker
+    participant S3 as AWS S3
+    participant CF as CloudFront CDN
+    participant API as WebSocket Gateway
+    participant Player as BrightSign Player
+
+    Worker->>Worker: Build manifest JSON & calculate SHA-256 hash
+    Worker->>S3: Upload manifest to S3 (/manifests/{device_id}.json)
+    Worker->>CF: Invalidate CloudFront path to clear CDN cache
+    Worker->>API: Trigger live WebSocket event via Socket.io
+    API->>Player: Push 'manifest_update' reload signal (if online)
+    Note over Player: If offline, Player will detect update during its 60s HTTP polling backup.
+```
+
+---
+
+## 3. Scheduled Content Logic (The "12:00 PM" Scenario)
+
+To guarantee gapless transitions on screen, **the system never waits until the scheduled time to download media.** 
+
+If a new playlist is scheduled to start at **12:00 PM**, the worker and player execute a look-ahead sequence hours in advance to pre-download the files directly onto the player's physical SD card.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Worker as cms-worker
+    participant DB as PostgreSQL DB
+    participant S3 as AWS S3 / CloudFront
+    participant Player as BrightSign Player
+
+    Note over Worker: Running Look-Ahead Query (e.g., at 10:00 AM)
+    Worker->>DB: Query schedules starting in the next 2 hours
+    DB-->>Worker: Return "Playlist B" starting at 12:00 PM for Device A
+    
+    Worker->>Worker: Build Manifest including current Playlist A AND upcoming Playlist B
+    Worker->>S3: Upload dual manifest to S3
+    Worker->>Player: Emit WebSocket notification 'manifest_update'
+    
+    Note over Player: Pre-Fetch Stage (e.g., at 10:05 AM)
+    Player->>S3: Read manifest, see upcoming Playlist B files
+    Player->>S3: Download Playlist B video files via CloudFront Signed URLs
+    Player->>Player: Save video files directly to physical SD Card
+    
+    Note over Player: Local Playback Transition (at 12:00 PM)
+    Player->>Player: Internal player clock matches 12:00 PM
+    Player->>Player: Instantly swap video sources to local SD Card files
+    Note over Player: Zero network calls, zero buffering, gapless transition
+```
+
+### Flow Step Details:
+1. **Look-Ahead Cron**: The worker runs a continuous 15-minute look-ahead cron. It queries Postgres for any playlist schedules starting within a 2-hour window.
+2. **Dual-Playlist Manifest**: Instead of replacing the current manifest, the worker appends the upcoming playlists under the `schedule_rules` and lists all their media dependencies in the manifest's master `playlist` array.
+3. **Pre-Staged Downloads**: When the player downloads the manifest, it compares the file checksums. It identifies files associated with the upcoming schedule and downloads them in the background while continuing to play the active loop.
+4. **Offline Playback Trigger**: The player's internal scheduler runs locally. At exactly 12:00 PM, the local transition logic triggers: it stops playing the daytime attract loop and begins playing the newly cached video directly from the SD card.
+
+---
+
+## 4. Local SD Card Staging & Offline Cache
+
+The media player operates in an **offline-first** environment. The storage on the physical SD card is strictly organized and managed by the player's runtime:
+
+```
+SD_CARD/
+├── manifest.json            # Local copy of the downloaded manifest
+├── pool/                    # Content storage pool
+│   ├── sha256-a1b2c3d4...   # Media files renamed to their SHA-256 hashes
+│   ├── sha256-e5f6g7h8...
+│   └── sha256-i9j0k1l2...
+└── logs/                    # Buffered telemetry files
+    ├── play-logs.txt
+    └── sensor-logs.txt
+```
+
+### Local Staging Logic:
+*   **Hash-Based Deduplication**: Files are stored in the `/pool/` directory and named after their SHA-256 checksums rather than their original file names. If multiple playlists use the same video asset, it is only downloaded and saved once.
+*   **Integrity Verification**: After downloading any file from the CDN, the player computes its SHA-256 hash. If it does not match the manifest checksum, the file is deleted and redownloaded.
+*   **Cache Eviction (LRU/Pruning)**: The player checks its storage capacity before starting a pre-fetch download. If storage is above 85%, it scans the manifest's active media lists and deletes local files that are no longer referenced in either current or upcoming scheduled rules.
+
+---
+
+## 5. Directory Structure
+
+```
+cms-worker/
+├── src/
+│   ├── config/                 # Env validation and schema configs
+│   │   ├── env.validation.ts
+│   │   └── configuration.ts
+│   ├── common/                 # Utilities, interceptors, and constants
+│   ├── prisma/                 # Prisma client wrapper and module
+│   ├── aws/                    # AWS SDK client wrappers (S3, SQS, SES, MediaConvert)
+│   ├── jobs/                   # Types, interfaces, and job payload DTOs
+│   ├── queues/                 # Redis BullMQ & SQS queue definitions
+│   └── processors/             # Background job processors
+│       ├── manifest.processor.ts
+│       ├── analytics.processor.ts
+│       ├── media.processor.ts
+│       ├── scheduler.processor.ts
+│       └── notification.processor.ts
+├── prisma/
+│   └── schema.prisma           # Shared PostgreSQL database schema
+├── nest-cli.json
+├── package.json
+└── tsconfig.json
+```
+
+---
+
+## 6. Job Payload Schemas
+
+### Manifest Job Payload (Redis BullMQ)
+Dispatched when a schedule changes or is manually forced.
+```json
+{
+  "deviceId": "uuid-device-123",
+  "tenantId": "uuid-tenant-999",
+  "reason": "schedule_changed"
+}
+```
+
+### Telemetry Batch Ingestion Payload (AWS SQS)
+Batched by the device and written to SQS for asynchronous writing.
+```json
+{
+  "deviceId": "uuid-device-123",
+  "tenantId": "uuid-tenant-999",
+  "batchTimestamp": 1721034000,
+  "proofOfPlay": [
+    {
+      "mediaId": "uuid-media-abc",
+      "playlistId": "uuid-playlist-daytime",
+      "duration": 30,
+      "playedFully": true,
+      "time": "2026-07-15T14:40:00Z"
+    }
+  ],
+  "sensorEvents": [
+    {
+      "sensorType": "pir",
+      "payload": { "detected": true },
+      "triggeredRuleId": "rule-pir-promo",
+      "time": "2026-07-15T14:41:10Z"
+    }
+  ]
+}
+```
+
+---
+
+## 7. Local Setup & Execution
+
+### Prerequisites
+*   Node.js 18+ & npm
+*   Running Redis instance (for BullMQ)
+*   Access to the PostgreSQL database
+
+### Installation
 ```bash
-# development
+# Install dependencies
+$ npm install
+
+# Generate Prisma Client
+$ npx prisma generate
+```
+
+### Run the Worker
+```bash
+# Development mode
 $ npm run start
 
-# watch mode
+# Watch mode (automatically recompile on changes)
 $ npm run start:dev
 
-# production mode
+# Production mode
 $ npm run start:prod
 ```
-
-## Run tests
-
-```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
-```
-
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
