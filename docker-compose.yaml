@@ -1,0 +1,113 @@
+services:
+
+  # TimescaleDB - Time-series analytics database (extends PostgreSQL)
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: cms-worker-timescaledb
+    environment:
+      POSTGRES_DB: analytics
+      POSTGRES_USER: analytics_user
+      POSTGRES_PASSWORD: analytics_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analytics_user -d analytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cms-worker-network
+
+  # Redis - Queue and cache storage for BullMQ
+  redis:
+    image: redis:7-alpine
+    container_name: cms-worker-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cms-worker-network
+
+  # RabbitMQ - Message broker for notifications and telemetry
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: cms-worker-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"      # AMQP port
+      - "15672:15672"    # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cms-worker-network
+
+  # Redpanda - Event streaming (Kafka-compatible)
+  # Alternative to Kafka for high-throughput telemetry
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: cms-worker-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1Gi
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=0.0.0.0:29092
+      - --advertise-kafka-addr=redpanda:29092
+      - --rpc-addr=0.0.0.0:33145
+      - --advertise-rpc-addr=redpanda:33145
+    ports:
+      - "29092:29092"    # Kafka API
+      - "9644:9644"      # Admin API
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info --brokers=localhost:29092 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cms-worker-network
+
+  # Redpanda Console - UI for Redpanda/Kafka management
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:latest
+    container_name: cms-worker-redpanda-console
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+      CONNECT_ENABLED: "false"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redpanda
+    networks:
+      - cms-worker-network
+
+networks:
+  cms-worker-network:
+    driver: bridge
+
+volumes:
+  timescaledb_data:
+  redis_data:
+  rabbitmq_data:
+  redpanda_data:
+
