@@ -18,6 +18,7 @@ export interface PlayerManifest {
   schemaVersion: 1;
   deviceId: string;
   revision: string;
+  serverNow?: string;
   playlist: PlayerManifestItem[];
   playlists?: Array<{
     id: string;
