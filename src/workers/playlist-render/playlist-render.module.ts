@@ -39,7 +39,9 @@ function parseResolution(value: string): { width: number; height: number } {
           '',
         playlistBucket: process.env.AWS_BUCKET_PLAYLIST || 'redsxp-playlist',
         processedBucket:
-          process.env.AWS_BUCKET_MEDIA_PROCESSED || 'redsxp-media-processed',
+          process.env.AWS_BUCKET_MEDIA_PROCESSED ||
+          process.env.AWS_BUCKET_PROCESSED ||
+          'redsxp-media-processed',
         pollIntervalMs: parseInt(
           process.env.PLAYLIST_RENDER_INTERVAL_MS || '30000',
         ),
