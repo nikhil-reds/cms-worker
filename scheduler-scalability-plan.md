@@ -2,6 +2,211 @@
 
 Step-wise plan to evolve the current scheduler worker from an MVP polling worker into a horizontally scalable scheduling system for 5 to 10 million users/devices.
 
+## 0. Implementation Status
+
+Last reviewed: 2026-07-21.
+
+This section reflects the current state across:
+
+- `/Users/nikhil/Desktop/rubenious-cms`
+- `/Users/nikhil/Desktop/cms-worker`
+- `/Users/nikhil/Desktop/player`
+
+### Done
+
+```text
+✅ CMS schedule write path
+├─ ✅ POST /api/schedules
+│  ├─ ✅ writes schedule to PostgreSQL
+│  ├─ ✅ emits schedule.updated to Redpanda
+│  └─ ✅ enqueues scheduler.evaluate.now to RabbitMQ
+└─ ✅ PUT /api/schedules/{id}
+   ├─ ✅ updates schedule in PostgreSQL
+   ├─ ✅ emits schedule.updated to Redpanda
+   └─ ✅ enqueues scheduler.evaluate.now to RabbitMQ
+```
+
+CMS changes completed:
+
+- ✅ Added `kafkajs`.
+- ✅ Added `amqplib`.
+- ✅ Added CMS Redpanda producer helper: `/Users/nikhil/Desktop/rubenious-cms/lib/redpanda.ts`.
+- ✅ Added CMS RabbitMQ publisher helper: `/Users/nikhil/Desktop/rubenious-cms/lib/rabbitmq.ts`.
+- ✅ Added Redpanda env values in CMS `.env`.
+- ✅ Added RabbitMQ env values in CMS `.env`.
+- ✅ Added `export const runtime = "nodejs"` to schedule routes so Kafka/RabbitMQ clients run in the Node runtime.
+
+Local infrastructure completed:
+
+```text
+✅ Redpanda
+├─ ✅ topic: schedule.updated
+├─ ✅ partitions: 3
+└─ ✅ host broker: localhost:29092
+
+✅ RabbitMQ
+├─ ✅ queue: scheduler.evaluate.now
+├─ ✅ durable: true
+└─ ✅ host broker: amqp://guest:guest@localhost:5672
+```
+
+Redpanda Docker listener fix completed in `/Users/nikhil/Desktop/cms-worker/docker-compose.yaml`:
+
+```text
+✅ internal listener: redpanda:9092
+✅ external listener: localhost:29092
+```
+
+Player capabilities already present:
+
+```text
+✅ Player
+├─ ✅ manifest pull mode
+│  ├─ ✅ reads manifestUrl from config/env
+│  ├─ ✅ polls every syncIntervalMs
+│  ├─ ✅ downloads manifest media
+│  ├─ ✅ selects active schedule locally
+│  └─ ✅ writes selected playlist to config.json
+├─ ✅ LAN API
+│  ├─ ✅ POST /api/media/:folder/:fileName
+│  ├─ ✅ POST /api/playlist/add
+│  ├─ ✅ POST /api/playlist/replace
+│  └─ ✅ POST /api/playlist/remove
+└─ ✅ renderer playback
+   ├─ ✅ reads config.json on startup
+   └─ ✅ re-reads every refreshIntervalMs
+```
+
+Verification completed:
+
+- ✅ CMS type-check passes with `npx tsc --noEmit --incremental false`.
+- ✅ Redpanda broker connectivity from CMS works after the advertised-listener fix.
+- ✅ RabbitMQ queue declaration from CMS works.
+- ✅ Worker build passes with `npm run build`.
+- ✅ Worker RabbitMQ consumer is registered on `scheduler.evaluate.now`.
+- ✅ Redpanda topic `scheduler.evaluation.completed` exists.
+
+Worker scheduler path completed:
+
+```text
+✅ Scheduler-worker path
+├─ ✅ consume scheduler.evaluate.now from RabbitMQ
+├─ ✅ parse job payload
+├─ ✅ acquire Redis lock per schedule/device/site key
+├─ ✅ read latest schedule state from PostgreSQL
+├─ ✅ evaluate active playlist
+├─ ✅ publish manifest or call Player API
+├─ ✅ acknowledge RabbitMQ job after successful processing
+└─ ✅ emit scheduler.evaluation.completed to Redpanda
+```
+
+Backup tick safety completed:
+
+```text
+✅ 60s backup tick remains enabled as reconciliation
+├─ ✅ uses the same manifest hash shape as realtime jobs
+├─ ✅ compares manifest hash before publishing
+├─ ✅ uses Redis manifest revision/hash cache
+├─ ✅ publishes only when content changed
+├─ ✅ sends WebSocket notification only after a new manifest revision
+└─ ✅ logs/events include source=realtime_job or source=backup_tick
+```
+
+### Left
+
+The current implementation now has the core event/job loop, retry/DLQ handling, Redis state caching, and Redpanda result events. Player push/apply is still incomplete.
+
+Remaining Redis work:
+
+```text
+⚠️ Redis
+├─ ✅ add distributed locks
+├─ ✅ add idempotency keys
+├─ ✅ cache active schedule state
+├─ ✅ cache manifest hash/revision
+└─ ✅ cache player update revision
+```
+
+Remaining RabbitMQ work:
+
+```text
+⚠️ RabbitMQ
+├─ ✅ implement scheduler consumer in cms-worker
+├─ ✅ add retry queue
+├─ ✅ add dead-letter queue
+├─ ✅ add prefetch/concurrency limits
+├─ ✅ add message acknowledgement rules
+└─ ✅ add queue lag metrics
+```
+
+Remaining Redpanda work:
+
+```text
+⚠️ Redpanda
+├─ ✅ emit scheduler.evaluation.completed
+├─ ✅ emit player.manifest.published
+├─ ✅ emit player.update.failed
+├─ ✅ add event schema/versioning
+└─ ✅ add optional debug/analytics consumer
+```
+
+Remaining player work for sub-1-second latency:
+
+```text
+⚠️ Player low-latency gap
+├─ ⚠️ LAN playlist API currently writes config.json
+├─ ✅ renderer can now receive immediate playlist.updated IPC
+│  └─ current config: 15000ms
+├─ ✅ manifest.updated WebSocket push fetches manifest immediately
+│  └─ current config: 30000ms
+└─ ✅ main process notifies renderer immediately
+```
+
+The WebSocket + immediate apply path is now implemented:
+
+```text
+✅ WebSocket manifest push
+├─ ✅ scheduler/control plane sends manifest.updated
+├─ ✅ player fetches manifest only if revision changed
+├─ ✅ Electron main applies playlist immediately
+└─ ✅ renderer reloads without waiting 15s
+
+⚠️ Polling fallback
+├─ ✅ manifest polling exists
+├─ ✅ config polling exists
+└─ ❌ not enough for sub-1-second latency
+```
+
+Remaining CMS work:
+
+- ❌ Add an outbox table if schedule writes and event/job publishing must be transactionally reliable.
+- ❌ Add request tracing IDs to the Redpanda event and RabbitMQ job.
+- ❌ Add UI/admin visibility for publish/enqueue failures.
+
+### Current Reality
+
+The architecture has moved from:
+
+```text
+CMS writes PostgreSQL only
+```
+
+to:
+
+```text
+CMS writes PostgreSQL
+├─ ✅ emits schedule.updated to Redpanda
+└─ ✅ enqueues scheduler.evaluate.now to RabbitMQ
+```
+
+But the full realtime system is not complete until:
+
+```text
+RabbitMQ job
+└─ ✅ scheduler worker consumes it
+   └─ ❌ player receives/applies the update quickly
+```
+
 ## 1. Current State
 
 The current scheduler is simple and useful for MVP scale:
@@ -787,7 +992,585 @@ Newly-rendered content
 └─ depends on media duration, file size, ffmpeg speed, and upload time
 ```
 
-## 17. Recommended Rollout Plan
+## 17. Target Sub-Second Player Update Architecture
+
+Use this architecture for less than 1 second updates when the target media/render already exists.
+
+```text
+                 Next.js CMS
+                      │
+               PostgreSQL
+                      │
+                RabbitMQ
+                      │
+             Scheduler Worker
+                      │
+            Update manifest in S3
+                      │
+          Notify via WebSocket
+                      │
+        ─────────────────────────
+       │            │            │
+    Player A     Player B     Player C
+       │            │            │
+ Fetch manifest if revision changed
+       │
+ Reload renderer
+```
+
+### 17.1 Target Flow
+
+```text
+Schedule changed in CMS
+├─ CMS writes schedule to PostgreSQL
+├─ CMS enqueues scheduler.evaluate.now to RabbitMQ
+├─ scheduler worker consumes the job
+├─ scheduler computes active playlist
+├─ scheduler compares manifest hash in Redis
+├─ scheduler writes new manifest to S3 only if changed
+├─ scheduler stores manifest revision/hash in Redis
+├─ scheduler sends WebSocket notification to target players
+│  ├─ deviceId
+│  ├─ manifestUrl
+│  ├─ manifestRevision
+│  └─ contentHash
+└─ player receives notification
+   ├─ compares revision/hash with local cache
+   ├─ fetches manifest only if revision changed
+   ├─ downloads missing media only if needed
+   ├─ applies playlist in memory
+   └─ reloads renderer immediately
+```
+
+### 17.2 Latency Budget
+
+```text
+CMS DB write                         20-100ms
+RabbitMQ publish                     5-30ms
+RabbitMQ delivery to scheduler       5-50ms
+Scheduler DB read + evaluation       20-150ms
+Redis hash/revision check            1-10ms
+S3 manifest write                    50-300ms
+WebSocket notify                     5-50ms
+Player manifest fetch                30-200ms
+Renderer in-memory apply             5-50ms
+```
+
+Target:
+
+```text
+p50: 300-600ms
+p95: < 1000ms
+p99: < 2000ms
+```
+
+Important condition:
+
+```text
+Sub-second update is realistic only when media is already rendered, uploaded, and CDN-accessible.
+```
+
+### 17.3 Components To Implement
+
+```text
+Scheduler Worker
+├─ ✅ consume scheduler.evaluate.now
+├─ ✅ use Redis locks/idempotency
+├─ ✅ publish manifest only when hash changed
+├─ ✅ cache manifest revision/hash
+├─ ✅ send WebSocket notification after manifest publish
+└─ ✅ target affected device connection by deviceId
+
+WebSocket Gateway
+├─ ✅ accept persistent player connections
+├─ ✅ authenticate player by device token
+├─ ✅ keep deviceId -> socket connection map
+├─ ✅ support fan-out by site/group/tenant
+├─ ✅ publish notification from scheduler to players
+├─ ✅ track connected/disconnected devices
+└─ ✅ expose basic connected-player metrics
+
+Player
+├─ ✅ connect to WebSocket gateway on startup
+├─ ✅ authenticate with deviceId/device token
+├─ ✅ receive manifest.updated notification
+├─ ✅ compare manifestRevision/contentHash
+├─ ✅ fetch manifest immediately if changed
+├─ ✅ apply playlist in memory
+├─ ✅ notify renderer immediately
+└─ ✅ keep polling as fallback
+```
+
+### 17.4 WebSocket Message Contract
+
+Notification sent from scheduler/control plane to players:
+
+```json
+{
+  "schemaVersion": 1,
+  "type": "manifest.updated",
+  "eventId": "uuid",
+  "deviceId": "SL-PLAYER-001",
+  "manifestUrl": "https://cdn.example.com/manifests/SL-PLAYER-001.json",
+  "manifestRevision": "2026-07-21T10:30:00.000Z",
+  "contentHash": "sha256...",
+  "publishedAt": "2026-07-21T10:30:00.000Z"
+}
+```
+
+Player acknowledgement:
+
+```json
+{
+  "schemaVersion": 1,
+  "type": "manifest.applied",
+  "eventId": "uuid",
+  "deviceId": "SL-PLAYER-001",
+  "manifestRevision": "2026-07-21T10:30:00.000Z",
+  "contentHash": "sha256...",
+  "appliedAt": "2026-07-21T10:30:00.420Z"
+}
+```
+
+Failure acknowledgement:
+
+```json
+{
+  "schemaVersion": 1,
+  "type": "manifest.apply_failed",
+  "eventId": "uuid",
+  "deviceId": "SL-PLAYER-001",
+  "manifestRevision": "2026-07-21T10:30:00.000Z",
+  "error": "Download failed with HTTP 403",
+  "failedAt": "2026-07-21T10:30:00.900Z"
+}
+```
+
+### 17.5 Step-Wise Implementation Plan
+
+Step 1: Add WebSocket gateway service.
+
+```text
+WebSocket Gateway
+├─ create standalone gateway or add to CMS API
+├─ endpoint: /ws/player
+├─ authenticate using device token
+├─ register connection by deviceId
+├─ heartbeat ping/pong every 20-30s
+└─ expose sendToDevice(deviceId, payload)
+```
+
+Step 2: Add scheduler notification publisher.
+
+```text
+Scheduler Worker
+├─ after manifest publish succeeds
+├─ send manifest.updated to WebSocket gateway
+├─ include manifestRevision and contentHash
+├─ if player is offline, skip push
+└─ player will catch up via fallback polling
+```
+
+Step 3: Add player WebSocket client.
+
+```text
+Player main process
+├─ connect to WebSocket gateway
+├─ send device auth message
+├─ listen for manifest.updated
+├─ ignore stale revisions
+├─ fetch manifest immediately
+├─ download missing media
+├─ write manifest-cache.json / sync-state.json
+├─ apply playlist immediately
+└─ notify renderer via Electron IPC
+```
+
+Step 4: Make renderer apply playlist without polling.
+
+```text
+Electron main process
+├─ sends playlist.updated IPC event
+└─ renderer receives event
+   ├─ updates in-memory playlist
+   ├─ restarts current playback if changed
+   └─ does not wait for refreshIntervalMs
+```
+
+Step 5: Keep polling as fallback.
+
+```text
+Fallback mode
+├─ manifest sync polling remains enabled
+├─ config.json refresh remains fallback only
+├─ poll intervals can be relaxed
+└─ disconnected players eventually catch up
+```
+
+### 17.6 Required New Env
+
+Scheduler worker:
+
+```env
+PLAYER_NOTIFY_ENABLED=true
+PLAYER_NOTIFY_GATEWAY_URL=http://localhost:3001
+PLAYER_NOTIFY_TIMEOUT_MS=1000
+```
+
+WebSocket gateway:
+
+```env
+PLAYER_WS_PORT=3001
+PLAYER_WS_PATH=/ws/player
+PLAYER_WS_TOKEN_SECRET=change-me
+```
+
+Player:
+
+```env
+PLAYER_DEVICE_ID=SL-PLAYER-001
+PLAYER_DEVICE_TOKEN=change-me
+PLAYER_WS_URL=ws://localhost:3001/ws/player
+PLAYER_MANIFEST_URL=https://d1zue4w6hf1jx0.cloudfront.net/manifests/SL-PLAYER-001.json
+```
+
+### 17.7 Metrics
+
+Track these timestamps:
+
+```text
+cms_saved_at
+rabbitmq_published_at
+scheduler_job_started_at
+manifest_published_at
+websocket_notified_at
+player_notification_received_at
+manifest_fetch_started_at
+manifest_fetch_completed_at
+renderer_reloaded_at
+```
+
+Required metrics:
+
+```text
+WebSocket
+├─ connected players
+├─ notify success count
+├─ notify failure count
+├─ notify latency p50/p95/p99
+└─ offline device count
+
+Player
+├─ notification receive latency
+├─ manifest fetch latency
+├─ manifest skipped because hash unchanged
+├─ renderer reload latency
+└─ apply failures
+```
+
+### 17.8 Failure Behavior
+
+```text
+WebSocket notify fails
+├─ log player.notify.failed
+├─ emit Redpanda event
+└─ rely on player manifest polling fallback
+
+Manifest fetch fails on player
+├─ keep current playlist
+├─ send manifest.apply_failed ack
+└─ retry on next push or fallback poll
+
+Player offline
+├─ scheduler still publishes manifest
+├─ no push delivered
+└─ player fetches latest manifest after reconnect/startup
+```
+
+## 18. Capacity Calculator And Bottleneck Model
+
+This calculator estimates how many players/devices the architecture can handle and where it will break first.
+
+The terms below use `devices` because the player is the scaling unit. If one business user manages many displays, user count can be much higher than device count without increasing WebSocket load.
+
+### 18.1 Inputs
+
+```text
+D  = connected devices / players
+U  = schedule updates per second from CMS
+F  = average fan-out devices per schedule update
+M  = average manifest size in KB
+P  = player fallback manifest poll interval in seconds
+W  = WebSocket connections per gateway instance
+R  = scheduler jobs processed per worker per second
+S  = S3/CDN manifest fetch requests per second
+```
+
+Recommended starting assumptions:
+
+```text
+M = 20 KB manifest
+P = 300s fallback poll after WebSocket is implemented
+W = 25,000 to 50,000 connected players per gateway instance
+R = 50 to 200 scheduler jobs/sec per worker
+```
+
+### 18.2 Core Formulas
+
+RabbitMQ job rate:
+
+```text
+scheduler_jobs_per_second = U
+```
+
+WebSocket notification rate:
+
+```text
+websocket_notifications_per_second = U × F
+```
+
+Fallback manifest fetch rate:
+
+```text
+fallback_manifest_fetch_rps = D / P
+```
+
+Push-triggered manifest fetch rate:
+
+```text
+push_manifest_fetch_rps = U × F
+```
+
+Total manifest fetch rate:
+
+```text
+S = fallback_manifest_fetch_rps + push_manifest_fetch_rps
+```
+
+WebSocket gateway instances:
+
+```text
+gateway_instances = ceil(D / W)
+```
+
+Scheduler worker instances:
+
+```text
+scheduler_workers = ceil(U / R)
+```
+
+Approx manifest bandwidth:
+
+```text
+manifest_bandwidth_MBps = (S × M) / 1024
+```
+
+### 18.3 Example Capacity Table
+
+Assumptions:
+
+```text
+P = 300s
+W = 40,000 connections per gateway
+R = 100 jobs/sec per scheduler worker
+M = 20 KB
+```
+
+```text
+Devices       Gateway instances    Fallback fetch RPS    Manifest bandwidth
+10,000        1                    34                    0.7 MB/s
+100,000       3                    334                   6.5 MB/s
+1,000,000     25                   3,334                 65 MB/s
+5,000,000     125                  16,667                326 MB/s
+10,000,000    250                  33,334                651 MB/s
+```
+
+Important reading:
+
+```text
+With WebSocket push, fallback polling can be slow, e.g. 300s.
+Without WebSocket push, a 1s poll interval at 10M devices would create 10M requests/sec, which is not acceptable.
+```
+
+### 18.4 Burst Calculator
+
+If one schedule update affects many devices:
+
+```text
+U = 1 update/sec
+F = 50,000 devices affected
+push_manifest_fetch_rps = 50,000 RPS
+```
+
+If ten large tenants update at the same time:
+
+```text
+U = 10 updates/sec
+F = 50,000 devices affected
+push_manifest_fetch_rps = 500,000 RPS
+```
+
+That burst is too high for origin/S3 directly. It requires:
+
+```text
+Burst protection
+├─ CDN in front of manifest
+├─ per-device jitter before manifest fetch
+├─ group-level manifests where possible
+├─ rate-limited fan-out
+└─ regional WebSocket gateways
+```
+
+Recommended player jitter:
+
+```text
+small update: fetch immediately
+large fan-out: random delay 0-2000ms
+emergency update: no jitter
+```
+
+### 18.5 Current System Capacity
+
+Current implemented state:
+
+```text
+✅ CMS -> RabbitMQ job
+✅ scheduler consumes job
+✅ Redis lock/idempotency/cache
+✅ manifest hash dedupe
+✅ S3 manifest publish
+❌ WebSocket notify
+❌ player immediate apply
+```
+
+Current practical capacity:
+
+```text
+Small deployment
+├─ 1 scheduler worker
+├─ 1 RabbitMQ
+├─ 1 Redis
+├─ 1 Redpanda
+└─ likely OK for thousands to low tens of thousands of devices
+```
+
+Main reason:
+
+```text
+The control plane can process jobs, but players still rely on 15s/30s polling.
+Low latency does not scale until WebSocket push exists.
+```
+
+### 18.6 Target System Capacity
+
+Target after WebSocket gateway + player immediate apply:
+
+```text
+100k devices
+├─ 3 WebSocket gateway instances
+├─ 2-3 scheduler workers
+├─ RabbitMQ single cluster
+├─ Redis single primary/replica or managed cache
+└─ CDN-backed manifests
+
+1M devices
+├─ 25-40 WebSocket gateway instances
+├─ 5-20 scheduler workers
+├─ RabbitMQ cluster or partitioned queues
+├─ Redis cluster/managed cache
+├─ Redpanda 3+ brokers
+└─ CDN mandatory
+
+10M devices
+├─ 250+ WebSocket gateway instances globally
+├─ regional scheduler fleets
+├─ partitioned RabbitMQ or multiple regional queues
+├─ Redis cluster per region
+├─ Redpanda regional clusters
+├─ CDN mandatory
+└─ group/site manifests to reduce fan-out
+```
+
+### 18.7 Main Issues And Bottlenecks
+
+```text
+Issue 1: Player polling
+├─ current 15s config refresh and 30s manifest sync
+└─ blocks sub-1-second latency
+
+Issue 2: Fan-out bursts
+├─ one schedule can affect thousands/millions of players
+└─ must use WebSocket fan-out plus CDN/jitter
+
+Issue 3: Per-device manifests
+├─ simple but expensive at 10M devices
+└─ use site/group manifests when many devices share schedules
+
+Issue 4: S3 origin pressure
+├─ many players fetching manifest at once can hit origin
+└─ put CDN in front and cache by revision
+
+Issue 5: RabbitMQ partitioning
+├─ one queue can become hot
+└─ partition by region/site/tenant at high scale
+
+Issue 6: Redis hot keys
+├─ very large tenants can hammer one tenant/site key
+└─ use device/site partition keys and regional Redis
+
+Issue 7: WebSocket connection state
+├─ 10M connected players cannot sit on one gateway
+└─ shard by region/deviceId and keep connection registry in Redis
+```
+
+### 18.8 Simple Decision Calculator
+
+Use this before promising scale:
+
+```text
+If D <= 10k
+├─ one region is fine
+├─ one WebSocket gateway may be enough
+└─ current RabbitMQ/Redis can work for pilot scale
+
+If D <= 100k
+├─ add 3+ WebSocket gateways
+├─ use CDN manifests
+├─ keep RabbitMQ prefetch/concurrency tuned
+└─ add dashboard for queue lag and connected players
+
+If D <= 1M
+├─ split by region
+├─ use multiple scheduler replicas
+├─ shard WebSocket gateways
+├─ use Redis cluster/managed cache
+└─ use Redpanda/RabbitMQ clusters
+
+If D > 1M
+├─ regionalize everything
+├─ avoid per-device fan-out where possible
+├─ use group/site manifests
+├─ add jitter for manifest fetches
+└─ capacity test every dependency separately
+```
+
+### 18.9 What It Can Handle Today Vs After Next Step
+
+```text
+Today
+├─ job pipeline: good for MVP/pilot
+├─ update latency: still 15-30s because player polls
+├─ likely device range: thousands to low tens of thousands
+└─ blocker: no WebSocket push / immediate renderer apply
+
+After WebSocket gateway + player immediate apply
+├─ update latency: p95 under 1s for already-rendered content
+├─ likely device range: 100k+ with horizontal gateways
+├─ 1M possible with regional/sharded gateways and CDN
+└─ 10M requires regional architecture and fan-out controls
+```
+
+## 19. Recommended Rollout Plan
 
 ```text
 Phase 1: Safe MVP scaling
@@ -823,7 +1606,7 @@ Phase 5: Multi-region scale
 └─ publish regional manifests through CDN
 ```
 
-## 18. Final Target Flow
+## 20. Final Target Flow
 
 ```text
 Schedule changed
