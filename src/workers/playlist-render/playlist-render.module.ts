@@ -7,6 +7,7 @@ import { PlaylistS3Service } from './playlist-s3.service';
 import { FfmpegRenderService } from './ffmpeg-render.service';
 import { PlayerConfigService } from '../media-sync/player-config.service';
 import { PlaylistRenderConfig } from './playlist-render.types';
+import { SchedulerEvaluatePublisherService } from './scheduler-evaluate-publisher.service';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const ffmpegStatic: string | null = require('ffmpeg-static');
@@ -92,19 +93,39 @@ function parseResolution(value: string): { width: number; height: number } {
       inject: ['PLAYLIST_RENDER_CONFIG'],
     },
     {
+      provide: SchedulerEvaluatePublisherService,
+      useFactory: () =>
+        new SchedulerEvaluatePublisherService(
+          process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672',
+          process.env.RABBITMQ_SCHEDULER_EVALUATE_QUEUE ||
+            'scheduler.evaluate.now',
+          process.env.RABBITMQ_ENABLED !== 'false',
+        ),
+    },
+    {
       provide: PlaylistRenderService,
       useFactory: (
         db: PlaylistDbService,
         s3: PlaylistS3Service,
         renderer: FfmpegRenderService,
         playerConfig: PlayerConfigService,
+        schedulerPublisher: SchedulerEvaluatePublisherService,
         config: PlaylistRenderConfig,
-      ) => new PlaylistRenderService(db, s3, renderer, playerConfig, config),
+      ) =>
+        new PlaylistRenderService(
+          db,
+          s3,
+          renderer,
+          playerConfig,
+          schedulerPublisher,
+          config,
+        ),
       inject: [
         PlaylistDbService,
         PlaylistS3Service,
         FfmpegRenderService,
         PlayerConfigService,
+        SchedulerEvaluatePublisherService,
         'PLAYLIST_RENDER_CONFIG',
       ],
     },
