@@ -13,6 +13,7 @@ import { PlayerConfigService } from '../media-sync/player-config.service';
 import { PlaylistDbService } from './playlist-db.service';
 import { PlaylistS3Service } from './playlist-s3.service';
 import { FfmpegRenderService } from './ffmpeg-render.service';
+import { SchedulerEvaluatePublisherService } from './scheduler-evaluate-publisher.service';
 import type {
   MediaKind,
   PendingPlaylist,
@@ -38,6 +39,7 @@ export class PlaylistRenderService implements OnApplicationShutdown {
     private s3: PlaylistS3Service,
     private renderer: FfmpegRenderService,
     private playerConfig: PlayerConfigService,
+    private schedulerPublisher: SchedulerEvaluatePublisherService,
     private config: PlaylistRenderConfig,
   ) {}
 
@@ -148,7 +150,11 @@ export class PlaylistRenderService implements OnApplicationShutdown {
         );
       }
 
-      const rendered = await this.renderer.renderPlaylist(pending.id, items);
+      const resolution = {
+        width: playlist.displayWidth,
+        height: playlist.displayHeight,
+      };
+      const rendered = await this.renderer.renderPlaylist(pending.id, items, resolution);
 
       // Upload the finished video to the processed bucket BEFORE installing
       // locally — a failed upload marks the render failed and retries without
@@ -165,7 +171,7 @@ export class PlaylistRenderService implements OnApplicationShutdown {
         pending.id,
         rendered.outputPath,
       );
-      await this.updatePlayerConfig(pending.id, installedSrc);
+      await this.updatePlayerConfig(pending.id, installedSrc, resolution);
 
       await this.db.markAsCompleted(
         pending.id,
@@ -175,9 +181,16 @@ export class PlaylistRenderService implements OnApplicationShutdown {
         s3Key,
         s3Url,
       );
+      await this.schedulerPublisher.publishRenderCompleted(pending.id).catch((error) => {
+        logger.warn(
+          `Render completed for ${pending.id}, but scheduler manifest refresh could not be queued: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
       logger.info(
         `✓ Rendered "${pending.name}" → ${installedSrc} + s3://${this.config.processedBucket}/${s3Key} ` +
-          `(${rendered.durationSec}s, ${Date.now() - startTime}ms)`,
+          `(${resolution.width}x${resolution.height}, ${rendered.durationSec}s, ${Date.now() - startTime}ms)`,
       );
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -239,6 +252,8 @@ export class PlaylistRenderService implements OnApplicationShutdown {
         mediaId: item.mediaId,
         position: item.position,
         durationSec: item.durationSec,
+        fit: item.fit,
+        objectPosition: item.objectPosition,
         kind,
         localPath,
       });
@@ -288,6 +303,7 @@ export class PlaylistRenderService implements OnApplicationShutdown {
   private async updatePlayerConfig(
     playlistId: string,
     src: string,
+    resolution: { width: number; height: number },
   ): Promise<void> {
     const entry = {
       id: playlistId,
@@ -295,6 +311,10 @@ export class PlaylistRenderService implements OnApplicationShutdown {
       src,
       loop: true,
       muted: false,
+      fit: 'scale-down' as const,
+      position: 'center' as const,
+      width: resolution.width,
+      height: resolution.height,
     };
 
     if (this.config.playerConfigMode === 'exclusive') {
