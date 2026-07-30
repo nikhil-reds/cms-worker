@@ -98,9 +98,11 @@ export class PlaylistDbService {
           p.tenant_id AS "tenantId",
           p.name,
           md5(
-            p.updated_at::text || '|' ||
+            p.updated_at::text || ':' || p.display_width || 'x' || p.display_height || ':' || p.display_name || '|' ||
             COALESCE(string_agg(
-              pi.media_id || ':' || pi.position || ':' || pi.duration_sec || ':' || m.updated_at::text,
+              pi.media_id || ':' || pi.position || ':' || pi.duration_sec || ':' ||
+              COALESCE(pi.fit, 'scale-down') || ':' || COALESCE(pi.object_position, 'center') || ':' ||
+              m.updated_at::text,
               ',' ORDER BY pi.position
             ), '')
           ) AS "sourceHash",
@@ -137,7 +139,17 @@ export class PlaylistDbService {
    */
   async loadPlaylistFromDb(playlistId: string): Promise<PlaylistJson | null> {
     const playlistResult = await this.pool.query(
-      `SELECT id, tenant_id AS "tenantId", name FROM playlists WHERE id = $1`,
+      `
+      SELECT
+        id,
+        tenant_id AS "tenantId",
+        name,
+        display_name AS "displayName",
+        display_width AS "displayWidth",
+        display_height AS "displayHeight"
+      FROM playlists
+      WHERE id = $1
+      `,
       [playlistId],
     );
     if (playlistResult.rows.length === 0) return null;
@@ -149,6 +161,8 @@ export class PlaylistDbService {
         pi.media_id     AS "mediaId",
         pi.position,
         pi.duration_sec AS "durationSec",
+        pi.fit,
+        pi.object_position AS "objectPosition",
         m.id            AS "m_id",
         m.name          AS "m_name",
         m.filename      AS "m_filename",
@@ -169,6 +183,8 @@ export class PlaylistDbService {
         mediaId: row.mediaId,
         position: row.position,
         durationSec: row.durationSec,
+        fit: row.fit ?? 'scale-down',
+        objectPosition: row.objectPosition ?? 'center',
         media: {
           id: row.m_id,
           name: row.m_name,
