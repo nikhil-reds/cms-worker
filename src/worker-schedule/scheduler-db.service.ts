@@ -22,6 +22,8 @@ export interface PublishedSchedule {
   localSrc: string;
   s3Key: string;
   s3Url: string;
+  displayWidth: number;
+  displayHeight: number;
 }
 
 /**
@@ -80,15 +82,20 @@ export class SchedulerDbService {
     localSrc: string;
     s3Key: string;
     s3Url: string;
+    displayWidth: number;
+    displayHeight: number;
   } | null> {
     const query = `
       SELECT
         output_path     AS "localSrc",
         s3_key          AS "s3Key",
-        s3_url          AS "s3Url"
-      FROM player_playlist_render
-      WHERE playlist_id = $1
-        AND render_status = 'completed'
+        s3_url          AS "s3Url",
+        p.display_width AS "displayWidth",
+        p.display_height AS "displayHeight"
+      FROM player_playlist_render r
+      INNER JOIN playlists p ON p.id = r.playlist_id
+      WHERE r.playlist_id = $1
+        AND r.render_status = 'completed'
     `;
 
     const result = await this.pool.query(query, [playlistId]);
@@ -108,9 +115,12 @@ export class SchedulerDbService {
         c.days_of_week    AS "daysOfWeek",
         r.output_path     AS "localSrc",
         r.s3_key          AS "s3Key",
-        r.s3_url          AS "s3Url"
+        r.s3_url          AS "s3Url",
+        p.display_width   AS "displayWidth",
+        p.display_height  AS "displayHeight"
       FROM calendars c
       INNER JOIN player_playlist_render r ON r.playlist_id = c.playlist_id
+      INNER JOIN playlists p ON p.id = c.playlist_id
       WHERE c.status = 'ACTIVE'
         AND r.render_status = 'completed'
         AND r.s3_url IS NOT NULL
