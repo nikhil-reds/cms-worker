@@ -11,6 +11,10 @@ export interface PlayerManifestItem {
   url: string;
   loop?: boolean;
   muted?: boolean;
+  fit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
+  position?: 'center' | 'top' | 'bottom' | 'left' | 'right';
+  width?: number;
+  height?: number;
   durationMs?: number;
 }
 
