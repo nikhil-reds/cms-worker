@@ -206,6 +206,10 @@ export class SchedulerService implements OnApplicationShutdown {
         url: this.toPublicMediaUrl(rendered.s3Url),
         loop: true,
         muted: false,
+        fit: 'scale-down' as const,
+        position: 'center' as const,
+        width: rendered.displayWidth,
+        height: rendered.displayHeight,
       },
     ], source);
 
@@ -235,6 +239,10 @@ export class SchedulerService implements OnApplicationShutdown {
           url: this.toPublicMediaUrl(schedule.s3Url),
           loop: true,
           muted: false,
+          fit: 'scale-down' as const,
+          position: 'center' as const,
+          width: schedule.displayWidth,
+          height: schedule.displayHeight,
         },
       ],
     }));
@@ -340,6 +348,10 @@ export class SchedulerService implements OnApplicationShutdown {
         url: this.toPublicMediaUrl(active.s3Url),
         loop: true,
         muted: false,
+        fit: 'scale-down' as const,
+        position: 'center' as const,
+        width: active.displayWidth,
+        height: active.displayHeight,
       },
     ];
   }
@@ -352,6 +364,10 @@ export class SchedulerService implements OnApplicationShutdown {
       url?: string;
       loop?: boolean;
       muted?: boolean;
+      fit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
+      position?: 'center' | 'top' | 'bottom' | 'left' | 'right';
+      width?: number;
+      height?: number;
       durationMs?: number;
     }>,
     source: 'realtime_job' | 'backup_tick',
@@ -380,6 +396,10 @@ export class SchedulerService implements OnApplicationShutdown {
             url: item.url,
             loop: item.loop,
             muted: item.muted,
+            fit: item.fit,
+            position: item.position,
+            width: item.width,
+            height: item.height,
             durationMs: item.durationMs,
           };
         });
