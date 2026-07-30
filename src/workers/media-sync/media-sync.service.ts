@@ -202,6 +202,8 @@ export class MediaSyncService implements OnApplicationShutdown {
           type: mediaType,
           src,
           muted: true,
+          fit: 'scale-down',
+          position: 'center',
           ...(mediaType === 'image' ? { durationMs: 8000 } : {}),
         });
       } else {
