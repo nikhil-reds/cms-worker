@@ -26,6 +26,12 @@ export const PlaylistItemSchema = z.object({
   mediaId: z.string(),
   position: z.number(),
   durationSec: z.number(),
+  fit: z
+    .enum(['cover', 'contain', 'fill', 'none', 'scale-down'])
+    .default('scale-down'),
+  objectPosition: z
+    .enum(['center', 'top', 'bottom', 'left', 'right'])
+    .default('center'),
   media: PlaylistMediaSchema,
 });
 
@@ -33,6 +39,9 @@ export const PlaylistJsonSchema = z.object({
   id: z.string(),
   tenantId: z.string(),
   name: z.string(),
+  displayName: z.string().default('Landscape 16:9'),
+  displayWidth: z.number().int().positive().default(1920),
+  displayHeight: z.number().int().positive().default(1080),
   playlistItems: z.array(PlaylistItemSchema),
 });
 
@@ -50,12 +59,16 @@ export interface PendingPlaylist {
 }
 
 export type MediaKind = 'video' | 'image' | 'audio';
+export type MediaFit = 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
+export type MediaPosition = 'center' | 'top' | 'bottom' | 'left' | 'right';
 
 /** A playlist item whose media file has been located on local disk. */
 export interface ResolvedItem {
   mediaId: string;
   position: number;
   durationSec: number;
+  fit: MediaFit;
+  objectPosition: MediaPosition;
   kind: MediaKind;
   localPath: string;
 }
@@ -63,6 +76,11 @@ export interface ResolvedItem {
 export interface RenderOutput {
   outputPath: string;
   durationSec: number;
+}
+
+export interface RenderResolution {
+  width: number;
+  height: number;
 }
 
 /** Where a completed render ended up (local player + S3). */
@@ -79,7 +97,7 @@ export interface PlaylistRenderConfig {
   playlistBucket: string; // playlist JSON (playlists/{id}.json)
   processedBucket: string; // rendered playlist MP4s are uploaded here
   pollIntervalMs: number;
-  resolution: { width: number; height: number };
+  resolution: RenderResolution;
   fps: number;
   /** append: rendered video joins existing player playlist entries.
    *  exclusive: rendered video replaces the whole player playlist. */

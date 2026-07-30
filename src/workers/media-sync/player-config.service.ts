@@ -20,6 +20,10 @@ export interface PlaylistItem {
   default?: boolean;
   muted?: boolean;
   loop?: boolean;
+  fit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
+  position?: 'center' | 'top' | 'bottom' | 'left' | 'right';
+  width?: number;
+  height?: number;
   durationMs?: number; // used for images
 }
 
