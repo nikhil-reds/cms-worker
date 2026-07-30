@@ -4,7 +4,9 @@ import { existsSync, mkdirSync, renameSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { createLogger } from '../../common/logger';
 import type {
+  MediaPosition,
   PlaylistRenderConfig,
+  RenderResolution,
   RenderOutput,
   ResolvedItem,
 } from './playlist-render.types';
@@ -44,8 +46,8 @@ export class FfmpegRenderService {
   }
 
   /** Profile string baked into segment cache keys — bump on encoder changes. */
-  private get profileKey(): string {
-    const { width, height } = this.config.resolution;
+  private profileKey(resolution: RenderResolution): string {
+    const { width, height } = resolution;
     return `${width}x${height}-${this.config.fps}fps-${this.config.shortVideoBehavior}`;
   }
 
@@ -56,13 +58,14 @@ export class FfmpegRenderService {
   async renderPlaylist(
     playlistId: string,
     items: ResolvedItem[],
+    resolution: RenderResolution = this.config.resolution,
   ): Promise<RenderOutput> {
     mkdirSync(this.segmentDir, { recursive: true });
     mkdirSync(this.workDir, { recursive: true });
 
     const segments: string[] = [];
     for (const item of items) {
-      segments.push(await this.normalizeItem(item));
+      segments.push(await this.normalizeItem(item, resolution));
     }
 
     const listPath = join(this.workDir, `${playlistId}.txt`);
@@ -115,10 +118,10 @@ export class FfmpegRenderService {
   /**
    * Normalize one playlist item into a cached uniform segment.
    */
-  private async normalizeItem(item: ResolvedItem): Promise<string> {
+  private async normalizeItem(item: ResolvedItem, resolution: RenderResolution): Promise<string> {
     const segmentPath = join(
       this.segmentDir,
-      `${item.mediaId}-${item.durationSec}s-${this.profileKey}.ts`,
+      `${item.mediaId}-${item.durationSec}s-${item.fit}-${item.objectPosition}-${this.profileKey(resolution)}.ts`,
     );
 
     if (existsSync(segmentPath)) {
@@ -132,10 +135,10 @@ export class FfmpegRenderService {
 
     const args =
       item.kind === 'image'
-        ? this.imageArgs(item, segmentPath)
+        ? this.imageArgs(item, segmentPath, resolution)
         : item.kind === 'audio'
-          ? this.audioArgs(item, segmentPath)
-          : this.videoArgs(item, segmentPath, await this.probe(item.localPath));
+          ? this.audioArgs(item, segmentPath, resolution)
+          : this.videoArgs(item, segmentPath, await this.probe(item.localPath), resolution);
 
     // Encode to a tmp name, then rename, so a crash mid-encode never leaves
     // a truncated segment behind for the cache to reuse.
@@ -146,13 +149,60 @@ export class FfmpegRenderService {
     return segmentPath;
   }
 
-  private get scaleFilter(): string {
-    const { width, height } = this.config.resolution;
+  private layoutFilter(item: ResolvedItem, resolution: RenderResolution): string {
+    const { width, height } = resolution;
+    const cropX = this.positionExpr(item.objectPosition, 'crop-x');
+    const cropY = this.positionExpr(item.objectPosition, 'crop-y');
+    const padX = this.positionExpr(item.objectPosition, 'pad-x');
+    const padY = this.positionExpr(item.objectPosition, 'pad-y');
+    const finish = `fps=${this.config.fps},format=yuv420p`;
+
+    if (item.fit === 'fill') {
+      return `scale=${width}:${height},${finish}`;
+    }
+
+    if (item.fit === 'cover') {
+      return (
+        `scale=${width}:${height}:force_original_aspect_ratio=increase,` +
+        `crop=${width}:${height}:${cropX}:${cropY},${finish}`
+      );
+    }
+
+    if (item.fit === 'none') {
+      return (
+        `crop=w='min(iw\\,${width})':h='min(ih\\,${height})':x=${cropX}:y=${cropY},` +
+        `pad=${width}:${height}:${padX}:${padY}:color=black,${finish}`
+      );
+    }
+
+    if (item.fit === 'scale-down') {
+      return (
+        `scale=w='min(iw\\,${width})':h='min(ih\\,${height})':` +
+        `force_original_aspect_ratio=decrease,` +
+        `pad=${width}:${height}:${padX}:${padY}:color=black,${finish}`
+      );
+    }
+
     return (
       `scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-      `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,` +
-      `fps=${this.config.fps},format=yuv420p`
+      `pad=${width}:${height}:${padX}:${padY}:color=black,${finish}`
     );
+  }
+
+  private positionExpr(
+    position: MediaPosition,
+    mode: 'crop-x' | 'crop-y' | 'pad-x' | 'pad-y',
+  ): string {
+    const isX = mode.endsWith('x');
+    if (isX) {
+      if (position === 'left') return '0';
+      if (position === 'right') return mode.startsWith('crop') ? 'iw-ow' : 'ow-iw';
+      return mode.startsWith('crop') ? '(iw-ow)/2' : '(ow-iw)/2';
+    }
+
+    if (position === 'top') return '0';
+    if (position === 'bottom') return mode.startsWith('crop') ? 'ih-oh' : 'oh-ih';
+    return mode.startsWith('crop') ? '(ih-oh)/2' : '(oh-ih)/2';
   }
 
   private get videoCodecArgs(): string[] {
@@ -168,7 +218,11 @@ export class FfmpegRenderService {
 
   /** Still image shown for durationSec, with a silent audio track so every
    *  segment has identical stream layout for the concat stream copy. */
-  private imageArgs(item: ResolvedItem, out: string): string[] {
+  private imageArgs(
+    item: ResolvedItem,
+    out: string,
+    resolution: RenderResolution,
+  ): string[] {
     return [
       '-y',
       '-loop',
@@ -186,7 +240,7 @@ export class FfmpegRenderService {
       '-i',
       FfmpegRenderService.SILENT_AUDIO,
       '-vf',
-      this.scaleFilter,
+      this.layoutFilter(item, resolution),
       ...this.videoCodecArgs,
       ...this.audioCodecArgs,
       '-shortest',
@@ -197,8 +251,12 @@ export class FfmpegRenderService {
   }
 
   /** Audio file over a black background frame. */
-  private audioArgs(item: ResolvedItem, out: string): string[] {
-    const { width, height } = this.config.resolution;
+  private audioArgs(
+    item: ResolvedItem,
+    out: string,
+    resolution: RenderResolution,
+  ): string[] {
+    const { width, height } = resolution;
     return [
       '-y',
       '-f',
@@ -230,6 +288,7 @@ export class FfmpegRenderService {
     item: ResolvedItem,
     out: string,
     probe: ProbeResult,
+    resolution: RenderResolution,
   ): string[] {
     const loop =
       this.config.shortVideoBehavior === 'loop' &&
@@ -248,7 +307,7 @@ export class FfmpegRenderService {
         '-t',
         String(item.durationSec),
         '-vf',
-        this.scaleFilter,
+        this.layoutFilter(item, resolution),
         ...this.videoCodecArgs,
         ...this.audioCodecArgs,
         '-f',
@@ -271,7 +330,7 @@ export class FfmpegRenderService {
       '-map',
       '1:a:0',
       '-vf',
-      this.scaleFilter,
+      this.layoutFilter(item, resolution),
       ...this.videoCodecArgs,
       ...this.audioCodecArgs,
       ...(loop ? [] : ['-shortest']),
