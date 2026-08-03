@@ -32,7 +32,18 @@ export const PlaylistItemSchema = z.object({
   objectPosition: z
     .enum(['center', 'top', 'bottom', 'left', 'right'])
     .default('center'),
+  zoneId: z.string().default('full-screen'),
   media: PlaylistMediaSchema,
+});
+
+export const PlaylistZoneSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  x: z.number(),
+  y: z.number(),
+  w: z.number(),
+  h: z.number(),
+  color: z.string().optional(),
 });
 
 export const PlaylistJsonSchema = z.object({
@@ -42,6 +53,10 @@ export const PlaylistJsonSchema = z.object({
   displayName: z.string().default('Landscape 16:9'),
   displayWidth: z.number().int().positive().default(1920),
   displayHeight: z.number().int().positive().default(1080),
+  layoutMode: z.enum(['zone', 'custom-grid']).default('zone'),
+  gridRows: z.number().int().positive().default(3),
+  gridColumns: z.number().int().positive().default(3),
+  zonesJson: z.array(PlaylistZoneSchema).nullable().optional(),
   playlistItems: z.array(PlaylistItemSchema),
 });
 
@@ -69,6 +84,7 @@ export interface ResolvedItem {
   durationSec: number;
   fit: MediaFit;
   objectPosition: MediaPosition;
+  zoneId: string;
   kind: MediaKind;
   localPath: string;
 }
@@ -81,6 +97,15 @@ export interface RenderOutput {
 export interface RenderResolution {
   width: number;
   height: number;
+}
+
+export interface RenderZone {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 /** Where a completed render ended up (local player + S3). */
