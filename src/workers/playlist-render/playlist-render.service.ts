@@ -154,7 +154,12 @@ export class PlaylistRenderService implements OnApplicationShutdown {
         width: playlist.displayWidth,
         height: playlist.displayHeight,
       };
-      const rendered = await this.renderer.renderPlaylist(pending.id, items, resolution);
+      const rendered = await this.renderer.renderPlaylist(
+        pending.id,
+        items,
+        resolution,
+        playlist.zonesJson ?? undefined,
+      );
 
       // Upload the finished video to the processed bucket BEFORE installing
       // locally — a failed upload marks the render failed and retries without
@@ -181,13 +186,15 @@ export class PlaylistRenderService implements OnApplicationShutdown {
         s3Key,
         s3Url,
       );
-      await this.schedulerPublisher.publishRenderCompleted(pending.id).catch((error) => {
-        logger.warn(
-          `Render completed for ${pending.id}, but scheduler manifest refresh could not be queued: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+      await this.schedulerPublisher
+        .publishRenderCompleted(pending.id)
+        .catch((error) => {
+          logger.warn(
+            `Render completed for ${pending.id}, but scheduler manifest refresh could not be queued: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
       logger.info(
         `✓ Rendered "${pending.name}" → ${installedSrc} + s3://${this.config.processedBucket}/${s3Key} ` +
           `(${resolution.width}x${resolution.height}, ${rendered.durationSec}s, ${Date.now() - startTime}ms)`,
@@ -254,6 +261,7 @@ export class PlaylistRenderService implements OnApplicationShutdown {
         durationSec: item.durationSec,
         fit: item.fit,
         objectPosition: item.objectPosition,
+        zoneId: item.zoneId,
         kind,
         localPath,
       });

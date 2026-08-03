@@ -98,10 +98,17 @@ export class PlaylistDbService {
           p.tenant_id AS "tenantId",
           p.name,
           md5(
-            p.updated_at::text || ':' || p.display_width || 'x' || p.display_height || ':' || p.display_name || '|' ||
+            p.updated_at::text || ':' ||
+            p.display_width || 'x' || p.display_height || ':' ||
+            p.display_name || ':' ||
+            COALESCE(p.layout_mode, 'zone') || ':' ||
+            COALESCE(p.grid_rows, 3)::text || 'x' ||
+            COALESCE(p.grid_columns, 3)::text || ':' ||
+            COALESCE(p.zones_json::text, '') || '|' ||
             COALESCE(string_agg(
               pi.media_id || ':' || pi.position || ':' || pi.duration_sec || ':' ||
               COALESCE(pi.fit, 'scale-down') || ':' || COALESCE(pi.object_position, 'center') || ':' ||
+              COALESCE(pi.zone_id, 'full-screen') || ':' ||
               m.updated_at::text,
               ',' ORDER BY pi.position
             ), '')
@@ -146,7 +153,11 @@ export class PlaylistDbService {
         name,
         display_name AS "displayName",
         display_width AS "displayWidth",
-        display_height AS "displayHeight"
+        display_height AS "displayHeight",
+        COALESCE(layout_mode, 'zone') AS "layoutMode",
+        COALESCE(grid_rows, 3) AS "gridRows",
+        COALESCE(grid_columns, 3) AS "gridColumns",
+        zones_json AS "zonesJson"
       FROM playlists
       WHERE id = $1
       `,
@@ -163,6 +174,7 @@ export class PlaylistDbService {
         pi.duration_sec AS "durationSec",
         pi.fit,
         pi.object_position AS "objectPosition",
+        COALESCE(pi.zone_id, 'full-screen') AS "zoneId",
         m.id            AS "m_id",
         m.name          AS "m_name",
         m.filename      AS "m_filename",
@@ -185,6 +197,7 @@ export class PlaylistDbService {
         durationSec: row.durationSec,
         fit: row.fit ?? 'scale-down',
         objectPosition: row.objectPosition ?? 'center',
+        zoneId: row.zoneId ?? 'full-screen',
         media: {
           id: row.m_id,
           name: row.m_name,
