@@ -8,6 +8,7 @@ import type {
   PlaylistRenderConfig,
   RenderResolution,
   RenderOutput,
+  RenderZone,
   ResolvedItem,
 } from './playlist-render.types';
 
@@ -20,6 +21,15 @@ interface ProbeResult {
   durationSec: number;
   hasAudio: boolean;
   hasVideo: boolean;
+}
+
+interface PixelZone {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 /**
@@ -59,42 +69,26 @@ export class FfmpegRenderService {
     playlistId: string,
     items: ResolvedItem[],
     resolution: RenderResolution = this.config.resolution,
+    zones: RenderZone[] = [],
   ): Promise<RenderOutput> {
     mkdirSync(this.segmentDir, { recursive: true });
     mkdirSync(this.workDir, { recursive: true });
+
+    const hasZoneLayout = items.some(
+      (item) => item.zoneId && item.zoneId !== 'full-screen',
+    );
+
+    if (hasZoneLayout) {
+      return this.renderZonedPlaylist(playlistId, items, resolution, zones);
+    }
 
     const segments: string[] = [];
     for (const item of items) {
       segments.push(await this.normalizeItem(item, resolution));
     }
 
-    const listPath = join(this.workDir, `${playlistId}.txt`);
-    writeFileSync(
-      listPath,
-      segments.map((s) => `file '${s.replace(/'/g, "'\\''")}'`).join('\n') +
-        '\n',
-      'utf-8',
-    );
-
     const outputPath = join(this.workDir, `${playlistId}.mp4`);
-    logger.info(`Concatenating ${segments.length} segment(s) → ${outputPath}`);
-
-    await this.runFfmpeg([
-      '-y',
-      '-f',
-      'concat',
-      '-safe',
-      '0',
-      '-i',
-      listPath,
-      '-c',
-      'copy',
-      '-bsf:a',
-      'aac_adtstoasc',
-      '-movflags',
-      '+faststart',
-      outputPath,
-    ]);
+    await this.concatSegments(playlistId, segments, outputPath);
 
     const probe = await this.probe(outputPath);
     const expectedSec = items.reduce((sum, item) => sum + item.durationSec, 0);
@@ -115,10 +109,253 @@ export class FfmpegRenderService {
     return { outputPath, durationSec: Math.round(probe.durationSec) };
   }
 
+  private async renderZonedPlaylist(
+    playlistId: string,
+    items: ResolvedItem[],
+    resolution: RenderResolution,
+    zones: RenderZone[],
+  ): Promise<RenderOutput> {
+    const zoneById = this.resolveZones(zones, resolution);
+    const grouped = new Map<string, ResolvedItem[]>();
+    for (const item of items) {
+      const zoneId = item.zoneId || 'full-screen';
+      grouped.set(zoneId, [...(grouped.get(zoneId) ?? []), item]);
+    }
+
+    const laneVideos: Array<{
+      zone: PixelZone;
+      path: string;
+      durationSec: number;
+    }> = [];
+    for (const [zoneId, laneItems] of grouped) {
+      const zone = zoneById.get(zoneId) ?? zoneById.get('full-screen')!;
+      const zoneResolution = { width: zone.width, height: zone.height };
+      const segments: string[] = [];
+      for (const item of laneItems) {
+        segments.push(await this.normalizeItem(item, zoneResolution));
+      }
+
+      const lanePath = join(this.workDir, `${playlistId}-${zoneId}.mp4`);
+      await this.concatSegments(`${playlistId}-${zoneId}`, segments, lanePath);
+      laneVideos.push({
+        zone,
+        path: lanePath,
+        durationSec: laneItems.reduce((sum, item) => sum + item.durationSec, 0),
+      });
+    }
+    laneVideos.sort((a, b) => {
+      const areaA = a.zone.width * a.zone.height;
+      const areaB = b.zone.width * b.zone.height;
+      return areaB - areaA;
+    });
+
+    const outputPath = join(this.workDir, `${playlistId}.mp4`);
+    const expectedSec = Math.max(...laneVideos.map((lane) => lane.durationSec));
+    logger.info(
+      `Compositing ${laneVideos.length} zone lane(s) → ${outputPath} (${expectedSec}s)`,
+    );
+
+    const args = [
+      '-y',
+      '-f',
+      'lavfi',
+      '-t',
+      String(expectedSec),
+      '-i',
+      `color=c=black:s=${resolution.width}x${resolution.height}:r=${this.config.fps}`,
+      '-f',
+      'lavfi',
+      '-t',
+      String(expectedSec),
+      '-i',
+      FfmpegRenderService.SILENT_AUDIO,
+      ...laneVideos.flatMap((lane) => ['-stream_loop', '-1', '-i', lane.path]),
+      '-filter_complex',
+      this.zoneOverlayFilter(laneVideos),
+      '-map',
+      '[vout]',
+      '-map',
+      '1:a:0',
+      '-t',
+      String(expectedSec),
+      ...this.videoCodecArgs,
+      ...this.audioCodecArgs,
+      '-movflags',
+      '+faststart',
+      outputPath,
+    ];
+
+    await this.runFfmpeg(args);
+
+    const probe = await this.probe(outputPath);
+    if (!probe.hasVideo || probe.durationSec <= 0) {
+      throw new Error(
+        `Rendered zoned file is invalid (video=${probe.hasVideo}, duration=${probe.durationSec}s)`,
+      );
+    }
+    if (probe.durationSec > expectedSec + DURATION_TOLERANCE_SEC) {
+      throw new Error(
+        `Rendered zoned duration ${probe.durationSec}s exceeds expected ${expectedSec}s beyond tolerance`,
+      );
+    }
+
+    return { outputPath, durationSec: Math.round(probe.durationSec) };
+  }
+
+  private async concatSegments(
+    playlistId: string,
+    segments: string[],
+    outputPath: string,
+  ): Promise<void> {
+    const listPath = join(this.workDir, `${playlistId}.txt`);
+    writeFileSync(
+      listPath,
+      segments.map((s) => `file '${s.replace(/'/g, "'\\''")}'`).join('\n') +
+        '\n',
+      'utf-8',
+    );
+
+    logger.info(`Concatenating ${segments.length} segment(s) → ${outputPath}`);
+
+    await this.runFfmpeg([
+      '-y',
+      '-f',
+      'concat',
+      '-safe',
+      '0',
+      '-i',
+      listPath,
+      '-c',
+      'copy',
+      '-bsf:a',
+      'aac_adtstoasc',
+      '-movflags',
+      '+faststart',
+      outputPath,
+    ]);
+  }
+
+  private zoneOverlayFilter(lanes: Array<{ zone: PixelZone }>): string {
+    let previous = '0:v';
+    const filters: string[] = [];
+    lanes.forEach((lane, index) => {
+      const input = `${index + 2}:v`;
+      const output = index === lanes.length - 1 ? 'vout' : `v${index}`;
+      filters.push(
+        `[${previous}][${input}]overlay=${lane.zone.x}:${lane.zone.y}:shortest=0:eof_action=pass[${output}]`,
+      );
+      previous = output;
+    });
+    return filters.join(';');
+  }
+
+  private resolveZones(
+    zones: RenderZone[],
+    resolution: RenderResolution,
+  ): Map<string, PixelZone> {
+    const defaults: RenderZone[] = [
+      { id: 'full-screen', name: 'Full Screen', x: 0, y: 0, w: 100, h: 100 },
+      { id: 'top-banner', name: 'Top Banner', x: 0, y: 0, w: 100, h: 22 },
+      {
+        id: 'bottom-banner',
+        name: 'Bottom Banner',
+        x: 0,
+        y: 78,
+        w: 100,
+        h: 22,
+      },
+      { id: 'left-panel', name: 'Left Panel', x: 0, y: 0, w: 32, h: 100 },
+      { id: 'center-panel', name: 'Center Panel', x: 32, y: 0, w: 36, h: 100 },
+      { id: 'right-panel', name: 'Right Panel', x: 68, y: 0, w: 32, h: 100 },
+      { id: 'main-area', name: 'Main Area', x: 32, y: 0, w: 68, h: 100 },
+      { id: 'middle-left', name: 'Middle Left', x: 0, y: 22, w: 32, h: 56 },
+      { id: 'middle', name: 'Middle', x: 32, y: 22, w: 36, h: 56 },
+      { id: 'middle-right', name: 'Middle Right', x: 68, y: 22, w: 32, h: 56 },
+      { id: 'left-top', name: 'Left Top', x: 0, y: 0, w: 32, h: 33.333 },
+      {
+        id: 'left-center',
+        name: 'Left Center',
+        x: 0,
+        y: 33.333,
+        w: 32,
+        h: 33.334,
+      },
+      {
+        id: 'left-bottom',
+        name: 'Left Bottom',
+        x: 0,
+        y: 66.667,
+        w: 32,
+        h: 33.333,
+      },
+      { id: 'center-top', name: 'Center Top', x: 32, y: 0, w: 36, h: 33.333 },
+      {
+        id: 'center-bottom',
+        name: 'Center Bottom',
+        x: 32,
+        y: 66.667,
+        w: 36,
+        h: 33.333,
+      },
+      { id: 'right-top', name: 'Right Top', x: 68, y: 0, w: 32, h: 33.333 },
+      {
+        id: 'right-center',
+        name: 'Right Center',
+        x: 68,
+        y: 33.333,
+        w: 32,
+        h: 33.334,
+      },
+      {
+        id: 'right-bottom',
+        name: 'Right Bottom',
+        x: 68,
+        y: 66.667,
+        w: 32,
+        h: 33.333,
+      },
+      {
+        id: 'main-area-left',
+        name: 'Main Area Left',
+        x: 32,
+        y: 0,
+        w: 34,
+        h: 100,
+      },
+      {
+        id: 'main-area-right',
+        name: 'Main Area Right',
+        x: 66,
+        y: 0,
+        w: 34,
+        h: 100,
+      },
+    ];
+
+    const even = (value: number) => Math.max(2, Math.round(value / 2) * 2);
+
+    return new Map(
+      [...defaults, ...zones].map((zone) => [
+        zone.id,
+        {
+          id: zone.id,
+          name: zone.name,
+          x: Math.round((zone.x / 100) * resolution.width),
+          y: Math.round((zone.y / 100) * resolution.height),
+          width: even((zone.w / 100) * resolution.width),
+          height: even((zone.h / 100) * resolution.height),
+        },
+      ]),
+    );
+  }
+
   /**
    * Normalize one playlist item into a cached uniform segment.
    */
-  private async normalizeItem(item: ResolvedItem, resolution: RenderResolution): Promise<string> {
+  private async normalizeItem(
+    item: ResolvedItem,
+    resolution: RenderResolution,
+  ): Promise<string> {
     const segmentPath = join(
       this.segmentDir,
       `${item.mediaId}-${item.durationSec}s-${item.fit}-${item.objectPosition}-${this.profileKey(resolution)}.ts`,
@@ -138,7 +375,12 @@ export class FfmpegRenderService {
         ? this.imageArgs(item, segmentPath, resolution)
         : item.kind === 'audio'
           ? this.audioArgs(item, segmentPath, resolution)
-          : this.videoArgs(item, segmentPath, await this.probe(item.localPath), resolution);
+          : this.videoArgs(
+              item,
+              segmentPath,
+              await this.probe(item.localPath),
+              resolution,
+            );
 
     // Encode to a tmp name, then rename, so a crash mid-encode never leaves
     // a truncated segment behind for the cache to reuse.
@@ -149,7 +391,10 @@ export class FfmpegRenderService {
     return segmentPath;
   }
 
-  private layoutFilter(item: ResolvedItem, resolution: RenderResolution): string {
+  private layoutFilter(
+    item: ResolvedItem,
+    resolution: RenderResolution,
+  ): string {
     const { width, height } = resolution;
     const cropX = this.positionExpr(item.objectPosition, 'crop-x');
     const cropY = this.positionExpr(item.objectPosition, 'crop-y');
@@ -196,12 +441,14 @@ export class FfmpegRenderService {
     const isX = mode.endsWith('x');
     if (isX) {
       if (position === 'left') return '0';
-      if (position === 'right') return mode.startsWith('crop') ? 'iw-ow' : 'ow-iw';
+      if (position === 'right')
+        return mode.startsWith('crop') ? 'iw-ow' : 'ow-iw';
       return mode.startsWith('crop') ? '(iw-ow)/2' : '(ow-iw)/2';
     }
 
     if (position === 'top') return '0';
-    if (position === 'bottom') return mode.startsWith('crop') ? 'ih-oh' : 'oh-ih';
+    if (position === 'bottom')
+      return mode.startsWith('crop') ? 'ih-oh' : 'oh-ih';
     return mode.startsWith('crop') ? '(ih-oh)/2' : '(oh-ih)/2';
   }
 
