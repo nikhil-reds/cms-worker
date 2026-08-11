@@ -5,6 +5,11 @@ export interface Media {
   fileName: string;
   fileSize: number;
   mimeType?: string; // hint derived from CMS media_types.name
+  sourceType?: 'upload' | 'external_url';
+  externalUrl?: string | null;
+  durationSec?: number | null;
+  width?: number | null;
+  height?: number | null;
   contentHash?: string; // not present in CMS schema; checksum check skipped when absent
   syncAttempts: number;
   createdAt: Date;
