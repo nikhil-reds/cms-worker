@@ -184,6 +184,22 @@ export class SchedulerService implements OnApplicationShutdown {
         `switching to playlist ${active.playlistId} source=${source}`,
     );
 
+    const containsHtml = await this.db.playlistContainsHtml(active.playlistId);
+    const directItems = containsHtml ? await this.db.getPlaylistPlaybackItems(active.playlistId) : [];
+
+    if (containsHtml && directItems.length > 0) {
+      await this.publishOrApplyPlaylist(directItems, source);
+
+      this.lastActivePlaylistId = active.playlistId;
+      logger.info(`✓ Player now playing HTML-capable playlist "${active.name}" source=${source}`);
+
+      return {
+        changed: true,
+        activePlaylistId: active.playlistId,
+        activeScheduleId: active.id,
+      };
+    }
+
     const rendered = await this.db.getPlaylistRenderOutput(active.playlistId);
 
     if (!rendered) {
@@ -229,25 +245,38 @@ export class SchedulerService implements OnApplicationShutdown {
     activeScheduleId: string | null;
   }> {
     const schedules = await this.db.getPublishedSchedules();
-    const playlists = schedules.map((schedule) => ({
-      id: schedule.playlistId,
-      items: [
-        {
+    const playlists = await Promise.all(schedules.map(async (schedule) => {
+      if (schedule.hasHtml) {
+        return {
           id: schedule.playlistId,
-          type: 'video' as const,
-          src: schedule.localSrc,
-          url: this.toPublicMediaUrl(schedule.s3Url),
-          loop: true,
-          muted: false,
-          fit: 'scale-down' as const,
-          position: 'center' as const,
-          width: schedule.displayWidth,
-          height: schedule.displayHeight,
-        },
-      ],
+          items: await this.db.getPlaylistPlaybackItems(schedule.playlistId),
+        };
+      }
+
+      if (!schedule.localSrc || !schedule.s3Url) {
+        return { id: schedule.playlistId, items: [] };
+      }
+
+      return {
+        id: schedule.playlistId,
+        items: [
+          {
+            id: schedule.playlistId,
+            type: 'video' as const,
+            src: schedule.localSrc,
+            url: this.toPublicMediaUrl(schedule.s3Url),
+            loop: true,
+            muted: false,
+            fit: 'scale-down' as const,
+            position: 'center' as const,
+            width: schedule.displayWidth,
+            height: schedule.displayHeight,
+          },
+        ],
+      };
     }));
 
-    const playlist = this.pickActivePlaylistFromSchedules(schedules);
+    const playlist = this.pickActivePlaylistFromSchedules(schedules, playlists);
     const scheduleEntries = schedules.map((schedule) => ({
       id: schedule.id,
       name: schedule.name,
@@ -326,6 +355,25 @@ export class SchedulerService implements OnApplicationShutdown {
 
   private pickActivePlaylistFromSchedules(
     schedules: Awaited<ReturnType<SchedulerDbService['getPublishedSchedules']>>,
+    playlists: Array<{ id: string; items: Array<{
+      id: string;
+      type: 'video' | 'image' | 'audio' | 'html';
+      src: string;
+      url?: string;
+      sourceType?: 'upload' | 'external_url';
+      loop?: boolean;
+      muted?: boolean;
+      fit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
+      position?: 'center' | 'top' | 'bottom' | 'left' | 'right';
+      width?: number;
+      height?: number;
+      durationMs?: number;
+      navigationPolicy?: 'same_origin' | 'allowlist' | 'allow_all';
+      navigationAllowlist?: string[];
+      reloadPolicy?: 'on_each_play' | 'once_per_playlist' | 'interval' | 'never';
+      reloadIntervalMs?: number;
+      loadTimeoutMs?: number;
+    }> }>,
   ) {
     const now = new Date();
     const active = schedules.find((schedule) => {
@@ -340,12 +388,16 @@ export class SchedulerService implements OnApplicationShutdown {
 
     if (!active) return [];
 
+    if (active.hasHtml) {
+      return playlists.find((playlist) => playlist.id === active.playlistId)?.items ?? [];
+    }
+
     return [
       {
         id: active.playlistId,
         type: 'video' as const,
-        src: active.localSrc,
-        url: this.toPublicMediaUrl(active.s3Url),
+        src: active.localSrc || '',
+        url: active.s3Url ? this.toPublicMediaUrl(active.s3Url) : '',
         loop: true,
         muted: false,
         fit: 'scale-down' as const,
@@ -359,9 +411,10 @@ export class SchedulerService implements OnApplicationShutdown {
   private async publishOrApplyPlaylist(
     playlist: Array<{
       id: string;
-      type: 'video' | 'image' | 'audio';
+      type: 'video' | 'image' | 'audio' | 'html';
       src: string;
       url?: string;
+      sourceType?: 'upload' | 'external_url';
       loop?: boolean;
       muted?: boolean;
       fit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
@@ -369,6 +422,11 @@ export class SchedulerService implements OnApplicationShutdown {
       width?: number;
       height?: number;
       durationMs?: number;
+      navigationPolicy?: 'same_origin' | 'allowlist' | 'allow_all';
+      navigationAllowlist?: string[];
+      reloadPolicy?: 'on_each_play' | 'once_per_playlist' | 'interval' | 'never';
+      reloadIntervalMs?: number;
+      loadTimeoutMs?: number;
     }>,
     source: 'realtime_job' | 'backup_tick',
   ): Promise<void> {
@@ -386,14 +444,16 @@ export class SchedulerService implements OnApplicationShutdown {
         }
 
         const manifestPlaylist = playlist.map((item) => {
-          if (!item.url) {
+          const isExternalHtml = item.type === 'html' && (item.sourceType === 'external_url' || /^https?:\/\//i.test(item.src));
+          if (!item.url && !isExternalHtml) {
             throw new Error(`Manifest item ${item.id} is missing a download URL`);
           }
           return {
             id: item.id,
             type: item.type,
             src: item.src,
-            url: item.url,
+            url: item.url ?? (isExternalHtml ? item.src : undefined),
+            sourceType: item.sourceType,
             loop: item.loop,
             muted: item.muted,
             fit: item.fit,
@@ -401,6 +461,11 @@ export class SchedulerService implements OnApplicationShutdown {
             width: item.width,
             height: item.height,
             durationMs: item.durationMs,
+            navigationPolicy: item.navigationPolicy,
+            navigationAllowlist: item.navigationAllowlist,
+            reloadPolicy: item.reloadPolicy,
+            reloadIntervalMs: item.reloadIntervalMs,
+            loadTimeoutMs: item.loadTimeoutMs,
           };
         });
 
