@@ -6,9 +6,15 @@ const logger = createLogger('ManifestPublisherService');
 
 export interface PlayerManifestItem {
   id: string;
-  type: 'video' | 'image' | 'audio';
+  type: 'video' | 'image' | 'audio' | 'html';
   src: string;
-  url: string;
+  url?: string;
+  sourceType?: 'upload' | 'external_url';
+  navigationPolicy?: 'same_origin' | 'allowlist' | 'allow_all';
+  navigationAllowlist?: string[];
+  reloadPolicy?: 'on_each_play' | 'once_per_playlist' | 'interval' | 'never';
+  reloadIntervalMs?: number;
+  loadTimeoutMs?: number;
   loop?: boolean;
   muted?: boolean;
   fit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
