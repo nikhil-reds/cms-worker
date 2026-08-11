@@ -11,12 +11,18 @@ import { createLogger } from '../../common/logger';
 
 const logger = createLogger('PlayerConfigService');
 
-export type PlaylistItemType = 'video' | 'image' | 'audio';
+export type PlaylistItemType = 'video' | 'image' | 'audio' | 'html';
 
 export interface PlaylistItem {
   id: string;
   type: PlaylistItemType;
   src: string; // relative to player root, e.g. "media/videos/promo.mp4"
+  sourceType?: 'upload' | 'external_url';
+  navigationPolicy?: 'same_origin' | 'allowlist' | 'allow_all';
+  navigationAllowlist?: string[];
+  reloadPolicy?: 'on_each_play' | 'once_per_playlist' | 'interval' | 'never';
+  reloadIntervalMs?: number;
+  loadTimeoutMs?: number;
   default?: boolean;
   muted?: boolean;
   loop?: boolean;
@@ -54,7 +60,7 @@ export class PlayerConfigService {
 
   async uploadMediaFile(
     localPath: string,
-    folder: 'videos' | 'images' | 'audio',
+    folder: 'videos' | 'images' | 'audio' | 'html',
     fileName: string,
   ): Promise<string> {
     if (!this.isRemote) {
