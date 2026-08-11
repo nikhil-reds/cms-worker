@@ -1,5 +1,8 @@
 import { Injectable, OnApplicationShutdown } from '@nestjs/common';
 import { dirname, basename, join } from 'path';
+import { existsSync, mkdirSync, renameSync, rmSync } from 'fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { createLogger } from '../../common/logger';
 import { DbListenerService } from './db-listener.service';
 import { S3ClientService } from './s3-client.service';
@@ -8,6 +11,7 @@ import { PlayerConfigService } from './player-config.service';
 import type { Media, MediaSyncConfig, SyncResult } from './media-sync.types';
 
 const logger = createLogger('MediaSyncService');
+const execFileAsync = promisify(execFile);
 
 @Injectable()
 export class MediaSyncService implements OnApplicationShutdown {
@@ -148,16 +152,54 @@ export class MediaSyncService implements OnApplicationShutdown {
       await this.dbListener.markAsSyncing(mediaId);
 
       const typeFolder = this.fileSystem.getMediaTypeFolder(media.mimeType, media.fileName);
-      const mediaType = typeFolder === 'videos' ? 'video' : typeFolder === 'images' ? 'image' : 'audio';
+      const mediaType = typeFolder === 'videos' ? 'video' : typeFolder === 'images' ? 'image' : typeFolder === 'html' ? 'html' : 'audio';
+
+      if (media.sourceType === 'external_url') {
+        const externalUrl = this.validateHttpUrl(media.externalUrl);
+        if (!externalUrl) {
+          throw new Error(`External HTML media ${mediaId} is missing a valid http(s) URL`);
+        }
+
+        await this.dbListener.markAsCompleted(mediaId, externalUrl);
+        await this.playerConfig.addToPlaylist({
+          id: mediaId,
+          type: 'html',
+          sourceType: 'external_url',
+          src: externalUrl,
+          muted: true,
+          fit: 'contain',
+          position: 'center',
+          durationMs: this.durationMs(media.durationSec, 20000),
+          width: media.width ?? undefined,
+          height: media.height ?? undefined,
+          navigationPolicy: 'same_origin',
+          reloadPolicy: 'on_each_play',
+        });
+
+        const duration = Date.now() - startTime;
+        logger.info(`✓ Registered external HTML ${mediaId} (${externalUrl}) in ${duration}ms`);
+        return {
+          mediaId,
+          success: true,
+          localPath: externalUrl,
+          fileSize: 0,
+          duration,
+        };
+      }
 
       // Generate a download path. In local mode this is the player's media
       // folder; in remote mode this is a worker-side staging folder before
       // upload to the player over the LAN API.
-      const localPath = this.fileSystem.generateLocalPath(
-        this.config.playerMediaRootPath,
-        media.fileName,
-        media.mimeType,
-      );
+      const htmlPackageRoot = typeFolder === 'html'
+        ? this.fileSystem.generateHtmlPackageRoot(this.config.playerMediaRootPath, mediaId)
+        : null;
+      const localPath = typeFolder === 'html'
+        ? join(htmlPackageRoot!, media.fileName.toLowerCase().endsWith('.zip') ? `${mediaId}.zip` : 'index.html')
+        : this.fileSystem.generateLocalPath(
+            this.config.playerMediaRootPath,
+            media.fileName,
+            media.mimeType,
+          );
 
       logger.info(`Syncing: ${mediaId} (${media.s3Key} → ${localPath})`);
 
@@ -188,23 +230,32 @@ export class MediaSyncService implements OnApplicationShutdown {
       }
 
       // Mark as completed
-      await this.dbListener.markAsCompleted(mediaId, localPath);
+      const playableHtmlSrc = typeFolder === 'html'
+        ? await this.prepareHtmlForPlayback(media, localPath, htmlPackageRoot!)
+        : null;
+      await this.dbListener.markAsCompleted(mediaId, playableHtmlSrc ? join(this.config.playerMediaRootPath, playableHtmlSrc.replace(/^media\//, '')) : localPath);
 
       // Add to the player's playlist so it auto-plays — but only files the
       // player can actually render (skip .txt, .zip, .pdf, ... uploads).
       if (this.isPlayable(media.fileName)) {
-        const src = this.playerConfig.isRemote
+        const src = playableHtmlSrc ?? (this.playerConfig.isRemote
           ? await this.playerConfig.uploadMediaFile(localPath, typeFolder, basename(localPath))
-          : join('media', typeFolder, basename(localPath)).split('\\').join('/');
+          : join('media', typeFolder, basename(localPath)).split('\\').join('/'));
 
         await this.playerConfig.addToPlaylist({
           id: mediaId,
           type: mediaType,
           src,
+          ...(mediaType === 'html' ? {
+            sourceType: 'upload' as const,
+            navigationPolicy: 'same_origin' as const,
+            reloadPolicy: 'on_each_play' as const,
+          } : {}),
           muted: true,
-          fit: 'scale-down',
+          fit: mediaType === 'html' ? 'contain' : 'scale-down',
           position: 'center',
           ...(mediaType === 'image' ? { durationMs: 8000 } : {}),
+          ...(mediaType === 'html' ? { durationMs: this.durationMs(media.durationSec, 20000), width: media.width ?? undefined, height: media.height ?? undefined } : {}),
         });
       } else {
         logger.warn(`Synced ${media.fileName} but did not add it to the playlist (not a playable media type)`);
@@ -239,7 +290,80 @@ export class MediaSyncService implements OnApplicationShutdown {
    * Only video/image/audio files the player can render belong in the playlist.
    */
   private isPlayable(fileName: string): boolean {
-    return /\.(mp4|mov|webm|mkv|avi|m4v|jpg|jpeg|png|gif|webp|bmp|mp3|wav|aac|m4a|ogg)$/i.test(fileName);
+    return /\.(mp4|mov|webm|mkv|avi|m4v|jpg|jpeg|png|gif|webp|bmp|mp3|wav|aac|m4a|ogg|html|htm|zip)$/i.test(fileName);
+  }
+
+  private validateHttpUrl(value?: string | null): string | null {
+    if (!value) return null;
+    try {
+      const url = new URL(value);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+      return url.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  private durationMs(durationSec: number | null | undefined, fallbackMs: number): number {
+    return Number.isFinite(durationSec) && Number(durationSec) > 0
+      ? Math.ceil(Number(durationSec) * 1000)
+      : fallbackMs;
+  }
+
+  private async prepareHtmlForPlayback(media: Media, downloadedPath: string, packageRoot: string): Promise<string> {
+    if (this.playerConfig.isRemote) {
+      if (media.fileName.toLowerCase().endsWith('.zip')) {
+        throw new Error('Remote player HTML ZIP installation is not supported by the LAN file upload API yet');
+      }
+      return this.playerConfig.uploadMediaFile(downloadedPath, 'html', 'index.html');
+    }
+
+    if (!media.fileName.toLowerCase().endsWith('.zip')) {
+      return join('media', 'html', media.id, 'index.html').split('\\').join('/');
+    }
+
+    const nextRoot = `${packageRoot}.next`;
+    const previousRoot = `${packageRoot}.previous`;
+    rmSync(nextRoot, { recursive: true, force: true });
+    mkdirSync(nextRoot, { recursive: true });
+
+    await this.validateZipEntries(downloadedPath);
+    await execFileAsync('unzip', ['-q', downloadedPath, '-d', nextRoot]);
+    this.validateExtractedHtmlPackage(nextRoot);
+
+    rmSync(previousRoot, { recursive: true, force: true });
+    if (existsSync(packageRoot)) {
+      renameSync(packageRoot, previousRoot);
+    }
+    renameSync(nextRoot, packageRoot);
+    rmSync(previousRoot, { recursive: true, force: true });
+
+    return join('media', 'html', media.id, 'index.html').split('\\').join('/');
+  }
+
+  private validateExtractedHtmlPackage(packageRoot: string): void {
+    const indexPath = join(packageRoot, 'index.html');
+    if (!existsSync(indexPath)) {
+      throw new Error('HTML ZIP package must contain index.html at the archive root');
+    }
+  }
+
+  private async validateZipEntries(zipPath: string): Promise<void> {
+    const { stdout } = await execFileAsync('unzip', ['-Z1', zipPath]);
+    const entries = stdout.split('\n').map((entry) => entry.trim()).filter(Boolean);
+    if (!entries.includes('index.html')) {
+      throw new Error('HTML ZIP package must contain index.html at the archive root');
+    }
+    for (const entry of entries) {
+      if (
+        entry.startsWith('/') ||
+        entry.includes('..') ||
+        entry.includes('\\') ||
+        entry.startsWith('__MACOSX/')
+      ) {
+        throw new Error(`Unsafe HTML ZIP entry: ${entry}`);
+      }
+    }
   }
 
   /**
