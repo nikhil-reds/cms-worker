@@ -72,8 +72,23 @@ export class PlayerWebSocketGatewayService implements OnApplicationShutdown {
       this.registerPlayer({ deviceId, tenantId, siteId, groupId }, socket);
     });
 
-    await new Promise<void>((resolve) => {
-      this.server?.listen(this.port, () => resolve());
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: NodeJS.ErrnoException) => {
+        this.server?.off('listening', onListening);
+        reject(
+          error.code === 'EADDRINUSE'
+            ? new Error(`Player WebSocket gateway port ${this.port} is already in use. Set PLAYER_WS_PORT to a free port.`)
+            : error,
+        );
+      };
+      const onListening = () => {
+        this.server?.off('error', onError);
+        resolve();
+      };
+
+      this.server?.once('error', onError);
+      this.server?.once('listening', onListening);
+      this.server?.listen(this.port);
     });
 
     this.heartbeatInterval = setInterval(() => this.checkHeartbeats(), this.heartbeatMs);
