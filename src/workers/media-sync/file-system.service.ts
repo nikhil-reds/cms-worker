@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { existsSync, mkdirSync, unlinkSync, readdirSync, statSync, createReadStream } from 'fs';
-import { join, dirname } from 'path';
+import { join } from 'path';
 import { createHash } from 'crypto';
 import { createLogger } from '../../common/logger';
 import { DiskStatus } from './media-sync.types';
@@ -245,19 +245,21 @@ export class FileSystemService {
   }
 
   /**
-   * Determine the player media folder (videos/images/audio) for a file,
+   * Determine the player media folder (videos/images/audio/html) for a file,
    * based on its mime type with a file-extension fallback.
    */
-  getMediaTypeFolder(mimeType?: string, fileName?: string): 'videos' | 'images' | 'audio' {
+  getMediaTypeFolder(mimeType?: string, fileName?: string): 'videos' | 'images' | 'audio' | 'html' {
     if (mimeType) {
       if (mimeType.startsWith('video/')) return 'videos';
       if (mimeType.startsWith('image/')) return 'images';
       if (mimeType.startsWith('audio/')) return 'audio';
+      if (mimeType.startsWith('text/html') || mimeType.includes('html')) return 'html';
     }
 
     const ext = (fileName || '').split('.').pop()?.toLowerCase() || '';
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) return 'images';
     if (['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac'].includes(ext)) return 'audio';
+    if (['html', 'htm', 'zip'].includes(ext)) return 'html';
     return 'videos'; // default: mp4, mov, webm, mkv, ...
   }
 
@@ -270,5 +272,9 @@ export class FileSystemService {
     // Sanitize the filename so a weird DB value can't escape the media folder
     const safeName = fileName.replace(/[/\\]/g, '_');
     return join(rootPath, typeFolder, safeName);
+  }
+
+  generateHtmlPackageRoot(rootPath: string, mediaId: string): string {
+    return join(rootPath, 'html', mediaId.replace(/[/\\]/g, '_'));
   }
 }
