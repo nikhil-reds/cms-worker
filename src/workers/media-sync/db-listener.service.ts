@@ -64,7 +64,12 @@ export class DbListenerService {
         m.tenant_id                 AS "tenantId",
         m.filename                  AS "fileName",
         m.s3_key                    AS "s3Key",
+        COALESCE(m.source_type, 'upload') AS "sourceType",
+        m.external_url              AS "externalUrl",
         m.size_bytes                AS "fileSize",
+        m.duration_sec              AS "durationSec",
+        m.width                     AS "width",
+        m.height                    AS "height",
         mt.name                     AS "mediaTypeName",
         COALESCE(s.sync_attempts,0) AS "syncAttempts",
         m.created_at                AS "createdAt"
@@ -72,7 +77,7 @@ export class DbListenerService {
       LEFT JOIN media_types mt ON mt.id = m.media_type_id
       LEFT JOIN player_media_sync s ON s.media_id = m.id
       WHERE m.status = 'READY'
-        AND m.s3_key IS NOT NULL
+        AND (m.s3_key IS NOT NULL OR COALESCE(m.source_type, 'upload') = 'external_url')
         AND (
           s.media_id IS NULL
           OR (s.sync_status = 'failed' AND s.sync_attempts < $1)
@@ -88,7 +93,12 @@ export class DbListenerService {
       tenantId: row.tenantId,
       fileName: row.fileName,
       s3Key: row.s3Key,
+      sourceType: row.sourceType === 'external_url' ? 'external_url' : 'upload',
+      externalUrl: row.externalUrl,
       fileSize: Number(row.fileSize),
+      durationSec: row.durationSec === null ? null : Number(row.durationSec),
+      width: row.width === null ? null : Number(row.width),
+      height: row.height === null ? null : Number(row.height),
       mimeType: this.toMimeHint(row.mediaTypeName),
       syncAttempts: Number(row.syncAttempts),
       createdAt: row.createdAt,
@@ -102,6 +112,7 @@ export class DbListenerService {
     if (name.startsWith('image')) return 'image/unknown';
     if (name.startsWith('video')) return 'video/unknown';
     if (name.startsWith('audio')) return 'audio/unknown';
+    if (name.startsWith('html')) return 'text/html';
     return undefined; // fall back to file-extension detection
   }
 
@@ -171,7 +182,9 @@ export class DbListenerService {
         (
           SELECT COUNT(*) FROM media m
           LEFT JOIN player_media_sync ps ON ps.media_id = m.id
-          WHERE m.status = 'READY' AND m.s3_key IS NOT NULL AND ps.media_id IS NULL
+          WHERE m.status = 'READY'
+            AND (m.s3_key IS NOT NULL OR COALESCE(m.source_type, 'upload') = 'external_url')
+            AND ps.media_id IS NULL
         ) AS pending,
         COUNT(*) FILTER (WHERE s.sync_status = 'syncing')                            AS syncing,
         COUNT(*) FILTER (WHERE s.sync_status = 'completed')                          AS completed,
