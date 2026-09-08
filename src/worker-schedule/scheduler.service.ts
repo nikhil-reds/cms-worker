@@ -33,7 +33,9 @@ export class SchedulerService implements OnApplicationShutdown {
     private redis: SchedulerRedisService,
     private events: SchedulerEventsService,
     private playerWebSocketGateway: PlayerWebSocketGatewayService,
-    private deviceId: string,
+    // Only used by the legacy single-player path (local dev without an S3
+    // manifest bucket). Manifest publishing resolves devices from the database.
+    private deviceId: string = '',
     private cdnBaseUrl: string = '',
     private processedBucket: string = '',
     private awsRegion: string = 'ap-south-1',
@@ -239,12 +241,69 @@ export class SchedulerService implements OnApplicationShutdown {
     };
   }
 
+  /**
+   * Publishes one manifest per installed screen. Each device only receives the
+   * schedules that target it, so content assigned to Screen 01 never reaches
+   * Screen 02.
+   */
   private async publishScheduleManifest(source: 'realtime_job' | 'backup_tick'): Promise<{
     changed: boolean;
     activePlaylistId: string | null;
     activeScheduleId: string | null;
   }> {
-    const schedules = await this.db.getPublishedSchedules();
+    const devices = await this.db.getTargetDevices();
+
+    if (devices.length === 0) {
+      logger.warn(
+        `source=${source} No installed players found; nothing to publish. ` +
+          'Install a player from the CMS to create a screen.',
+      );
+      return { changed: false, activePlaylistId: null, activeScheduleId: null };
+    }
+
+    const untargeted = await this.db.getUntargetedActiveCalendars();
+    if (untargeted.length > 0) {
+      logger.warn(
+        `source=${source} ${untargeted.length} active schedule(s) target no screen and will not play: ` +
+          untargeted.map((calendar) => `"${calendar.name}"`).join(', '),
+      );
+    }
+
+    let anyChanged = false;
+    let firstActivePlaylistId: string | null = null;
+    let firstActiveScheduleId: string | null = null;
+
+    for (const device of devices) {
+      try {
+        const result = await this.publishScheduleManifestForDevice(device.id, source);
+        if (result.changed) anyChanged = true;
+        if (firstActivePlaylistId === null) firstActivePlaylistId = result.activePlaylistId;
+        if (firstActiveScheduleId === null) firstActiveScheduleId = result.activeScheduleId;
+      } catch (error) {
+        // One bad screen must not stop the rest from being updated.
+        logger.error(
+          `source=${source} Failed to publish manifest for device ${device.id} (${device.name}): %s`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+
+    return {
+      changed: anyChanged,
+      activePlaylistId: firstActivePlaylistId,
+      activeScheduleId: firstActiveScheduleId,
+    };
+  }
+
+  private async publishScheduleManifestForDevice(
+    deviceId: string,
+    source: 'realtime_job' | 'backup_tick',
+  ): Promise<{
+    changed: boolean;
+    activePlaylistId: string | null;
+    activeScheduleId: string | null;
+  }> {
+    const schedules = await this.db.getPublishedSchedules(deviceId);
     const playlists = await Promise.all(schedules.map(async (schedule) => {
       if (schedule.hasHtml) {
         return {
@@ -288,18 +347,18 @@ export class SchedulerService implements OnApplicationShutdown {
     }));
     const manifestContent = {
       schemaVersion: 1 as const,
-      deviceId: this.deviceId,
+      deviceId: deviceId,
       serverNow: new Date().toISOString(),
       playlist,
       playlists,
       schedules: scheduleEntries,
     };
     const contentHash = this.hashJson(manifestContent);
-    const manifestState = await this.redis.getManifestState(this.deviceId);
+    const manifestState = await this.redis.getManifestState(deviceId);
 
     if (manifestState?.contentHash === contentHash) {
       logger.info(
-        `source=${source} Manifest content unchanged for ${this.deviceId}, skipping publish`,
+        `source=${source} Manifest content unchanged for ${deviceId}, skipping publish`,
       );
       return {
         changed: false,
@@ -314,7 +373,7 @@ export class SchedulerService implements OnApplicationShutdown {
       revision,
     });
 
-    await this.redis.setManifestState(this.deviceId, {
+    await this.redis.setManifestState(deviceId, {
       contentHash,
       revision,
       manifestUrl,
@@ -323,7 +382,7 @@ export class SchedulerService implements OnApplicationShutdown {
       schemaVersion: 1,
       eventId: crypto.randomUUID(),
       eventType: 'player.manifest.published',
-      deviceId: this.deviceId,
+      deviceId: deviceId,
       manifestUrl,
       manifestRevision: revision,
       contentHash,
@@ -335,7 +394,7 @@ export class SchedulerService implements OnApplicationShutdown {
       schemaVersion: 1,
       type: 'manifest.updated',
       eventId: crypto.randomUUID(),
-      deviceId: this.deviceId,
+      deviceId: deviceId,
       manifestUrl,
       manifestRevision: revision,
       contentHash,
@@ -434,7 +493,7 @@ export class SchedulerService implements OnApplicationShutdown {
     const revision = new Date().toISOString();
 
     try {
-      if (this.manifestPublisher.enabled) {
+      if (this.manifestPublisher.enabled && this.deviceId) {
         const manifestState = await this.redis.getManifestState(this.deviceId);
         if (manifestState?.contentHash === contentHash) {
           logger.info(

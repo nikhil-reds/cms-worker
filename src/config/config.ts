@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { join } from 'path';
+import { defaultPlayerRootPath, defaultScratchDir } from './paths';
 
 const EnvSchema = z.object({
   // Node environment
@@ -20,7 +22,10 @@ const EnvSchema = z.object({
   AWS_BUCKET_MEDIA: z.string().optional().describe('S3 bucket for media storage'),
 
   // Media Sync Worker Configuration
-  PLAYER_MEDIA_ROOT_PATH: z.string().default('/tmp/Player/media').describe('Root path for Player media folder'),
+  PLAYER_MEDIA_ROOT_PATH: z
+    .string()
+    .default(join(defaultPlayerRootPath(), 'media'))
+    .describe('Root path for Player media folder'),
   MEDIA_SYNC_STRATEGY: z.enum(['polling', 'listen']).default('polling').describe('Database listening strategy'),
   MEDIA_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(30000).describe('Polling interval in milliseconds'),
   MEDIA_SYNC_CONCURRENCY: z.coerce.number().int().positive().default(5).describe('Number of concurrent downloads'),
@@ -37,7 +42,7 @@ const EnvSchema = z.object({
   PLAYLIST_RENDER_FPS: z.coerce.number().int().positive().default(30),
   PLAYLIST_RENDER_MODE: z.enum(['append', 'exclusive']).default('append').describe('append: add to player playlist; exclusive: replace it'),
   PLAYLIST_RENDER_SHORT_VIDEO: z.enum(['natural', 'loop']).default('natural').describe('Videos shorter than their item duration: play once or loop to fill'),
-  PLAYLIST_RENDER_SCRATCH_DIR: z.string().default('/tmp/cms-worker/renders'),
+  PLAYLIST_RENDER_SCRATCH_DIR: z.string().default(defaultScratchDir()),
   FFMPEG_PATH: z.string().optional().describe('Override for the bundled ffmpeg binary'),
   FFPROBE_PATH: z.string().optional().describe('Override for the bundled ffprobe binary'),
 
@@ -67,6 +72,9 @@ const EnvSchema = z.object({
   REDPANDA_SCHEDULER_DEBUG_CONSUMER_GROUP: z
     .string()
     .default('cms-worker-scheduler-debug'),
+  PLAYER_MANIFEST_BUCKET: z.string().optional(),
+  PLAYER_MANIFEST_PUBLIC_BASE_URL: z.string().url().optional(),
+  PLAYER_MANIFEST_PREFIX: z.string().default('manifests'),
   PLAYER_WS_ENABLED: z.coerce.boolean().default(false),
   PLAYER_WS_PORT: z.coerce.number().int().positive().default(3031),
   PLAYER_WS_PATH: z.string().default('/ws/player'),

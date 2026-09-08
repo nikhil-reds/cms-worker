@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { join } from 'path';
 import { PlaylistRenderProcessor } from './playlist-render.processor';
 import { PlaylistRenderService } from './playlist-render.service';
 import { PlaylistDbService } from './playlist-db.service';
@@ -8,14 +7,18 @@ import { FfmpegRenderService } from './ffmpeg-render.service';
 import { PlayerConfigService } from '../media-sync/player-config.service';
 import { PlaylistRenderConfig } from './playlist-render.types';
 import { SchedulerEvaluatePublisherService } from './scheduler-evaluate-publisher.service';
+import {
+  defaultScratchDir,
+  resolvePlayerMediaRootPath,
+  resolvePlayerRootPath,
+} from '../../config/paths';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const ffmpegStatic: string | null = require('ffmpeg-static');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const ffprobeStatic: { path: string } = require('ffprobe-static');
 
-const PLAYER_ROOT =
-  process.env.PLAYER_ROOT_PATH || '/Users/nikhil/Desktop/player';
+const PLAYER_ROOT = resolvePlayerRootPath(process.env.PLAYER_ROOT_PATH);
 const PLAYER_API_URL = (process.env.PLAYER_API_URL || '').replace(/\/$/, '');
 
 function parseResolution(value: string): { width: number; height: number } {
@@ -30,9 +33,11 @@ function parseResolution(value: string): { width: number; height: number } {
       provide: 'PLAYLIST_RENDER_CONFIG',
       useFactory: (): PlaylistRenderConfig => ({
         playerRootPath: PLAYER_ROOT,
-        playerMediaRootPath:
-          process.env.PLAYER_MEDIA_ROOT_PATH ||
-          (PLAYER_API_URL ? '/tmp/cms-worker/player-media' : join(PLAYER_ROOT, 'media')),
+        playerMediaRootPath: resolvePlayerMediaRootPath(
+          process.env.PLAYER_MEDIA_ROOT_PATH,
+          PLAYER_ROOT,
+          PLAYER_API_URL,
+        ),
         mediaBucket:
           process.env.AWS_BUCKET_MEDIA ||
           process.env.S3_BUCKET ||
@@ -54,7 +59,7 @@ function parseResolution(value: string): { width: number; height: number } {
         shortVideoBehavior:
           (process.env.PLAYLIST_RENDER_SHORT_VIDEO as any) || 'natural',
         scratchDir:
-          process.env.PLAYLIST_RENDER_SCRATCH_DIR || '/tmp/cms-worker/renders',
+          process.env.PLAYLIST_RENDER_SCRATCH_DIR || defaultScratchDir(),
         ffmpegPath: process.env.FFMPEG_PATH || ffmpegStatic || 'ffmpeg',
         ffprobePath:
           process.env.FFPROBE_PATH || ffprobeStatic.path || 'ffprobe',

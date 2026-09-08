@@ -51,11 +51,11 @@ export class ManifestPublisherService {
 
   constructor(
     private readonly bucket: string,
-    private readonly key: string,
     private readonly region: string,
     accessKeyId: string,
     secretAccessKey: string,
     private readonly publicBaseUrl = '',
+    private readonly keyPrefix = 'manifests',
   ) {
     this.s3Client = new S3Client({
       region,
@@ -64,36 +64,47 @@ export class ManifestPublisherService {
   }
 
   get enabled(): boolean {
-    return Boolean(this.bucket && this.key);
+    return Boolean(this.bucket);
   }
 
-  get manifestUrl(): string {
+  /** Every screen gets its own manifest object, keyed by its CMS device id. */
+  manifestKeyFor(deviceId: string): string {
+    return `${this.keyPrefix.replace(/\/$/, '')}/${deviceId}.json`;
+  }
+
+  manifestUrlFor(deviceId: string): string {
+    const key = this.manifestKeyFor(deviceId);
+
     if (this.publicBaseUrl) {
-      return `${this.publicBaseUrl.replace(/\/$/, '')}/${this.key}`;
+      return `${this.publicBaseUrl.replace(/\/$/, '')}/${key}`;
     }
 
-    return `https://${this.bucket}.s3.${this.region}.amazonaws.com/${this.key}`;
+    return `https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}`;
   }
 
   async publish(manifest: PlayerManifest): Promise<string> {
     if (!this.enabled) {
       throw new Error('Player manifest publishing is not configured');
     }
+    if (!manifest.deviceId) {
+      throw new Error('Cannot publish a manifest without a deviceId');
+    }
 
     await this.s3Client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
-        Key: this.key,
+        Key: this.manifestKeyFor(manifest.deviceId),
         Body: `${JSON.stringify(manifest, null, 2)}\n`,
         ContentType: 'application/json',
         CacheControl: 'no-store',
       }),
     );
 
+    const manifestUrl = this.manifestUrlFor(manifest.deviceId);
     logger.info(
-      `Published player manifest revision ${manifest.revision} to ${this.manifestUrl}`,
+      `Published player manifest revision ${manifest.revision} to ${manifestUrl}`,
     );
 
-    return this.manifestUrl;
+    return manifestUrl;
   }
 }

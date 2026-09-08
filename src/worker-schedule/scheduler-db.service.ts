@@ -27,6 +27,12 @@ export interface PublishedSchedule {
   hasHtml: boolean;
 }
 
+export interface TargetDevice {
+  id: string;
+  name: string;
+  tenantId: string;
+}
+
 export interface PlaylistPlaybackItem {
   id: string;
   type: 'video' | 'image' | 'audio' | 'html';
@@ -167,7 +173,38 @@ export class SchedulerDbService {
     return Boolean(result.rows[0]?.hasHtml);
   }
 
-  async getPublishedSchedules(): Promise<PublishedSchedule[]> {
+  /**
+   * Screens the worker publishes manifests for: devices that actually have a
+   * player installed. Manual placeholder screens have no install and cannot
+   * pull a manifest, so they are skipped.
+   */
+  async getTargetDevices(): Promise<TargetDevice[]> {
+    const result = await this.pool.query(`
+      SELECT d.id, d.name, d.tenant_id AS "tenantId"
+      FROM devices d
+      WHERE d.install_id IS NOT NULL
+      ORDER BY d.name ASC
+    `);
+    return result.rows;
+  }
+
+  /**
+   * Active calendars with no screen selected. These publish to nothing, so the
+   * worker logs them rather than silently dropping the content.
+   */
+  async getUntargetedActiveCalendars(): Promise<ActiveCalendar[]> {
+    const result = await this.pool.query(`
+      SELECT c.id, c.name, c.playlist_id AS "playlistId", c.priority
+      FROM calendars c
+      WHERE c.status = 'ACTIVE'
+        AND NOT EXISTS (
+          SELECT 1 FROM "_CalendarToDevice" cd WHERE cd."A" = c.id
+        )
+    `);
+    return result.rows;
+  }
+
+  async getPublishedSchedules(deviceId: string): Promise<PublishedSchedule[]> {
     const query = `
       SELECT
         c.id,
@@ -199,6 +236,11 @@ export class SchedulerDbService {
       INNER JOIN playlists p ON p.id = c.playlist_id
       LEFT JOIN player_playlist_render r ON r.playlist_id = c.playlist_id
       WHERE c.status = 'ACTIVE'
+        AND EXISTS (
+          SELECT 1
+          FROM "_CalendarToDevice" cd
+          WHERE cd."A" = c.id AND cd."B" = $1
+        )
         AND (
           (r.render_status = 'completed' AND r.s3_url IS NOT NULL)
           OR EXISTS (
@@ -218,7 +260,7 @@ export class SchedulerDbService {
       ORDER BY c.priority DESC, c.start_time ASC
     `;
 
-    const result = await this.pool.query(query);
+    const result = await this.pool.query(query, [deviceId]);
     return result.rows.map((row) => ({ ...row, hasHtml: Boolean(row.hasHtml) }));
   }
 

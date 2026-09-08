@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { join } from 'path';
 import { MediaSyncProcessor } from './media-sync.processor';
 import { MediaSyncService } from './media-sync.service';
 import { DbListenerService } from './db-listener.service';
@@ -7,8 +6,12 @@ import { S3ClientService } from './s3-client.service';
 import { FileSystemService } from './file-system.service';
 import { PlayerConfigService } from './player-config.service';
 import { MediaSyncConfig } from './media-sync.types';
+import {
+  resolvePlayerMediaRootPath,
+  resolvePlayerRootPath,
+} from '../../config/paths';
 
-const PLAYER_ROOT = process.env.PLAYER_ROOT_PATH || '/Users/nikhil/Desktop/player';
+const PLAYER_ROOT = resolvePlayerRootPath(process.env.PLAYER_ROOT_PATH);
 const PLAYER_API_URL = (process.env.PLAYER_API_URL || '').replace(/\/$/, '');
 
 @Module({
@@ -16,9 +19,11 @@ const PLAYER_API_URL = (process.env.PLAYER_API_URL || '').replace(/\/$/, '');
     {
       provide: 'MEDIA_SYNC_CONFIG',
       useFactory: (): MediaSyncConfig => ({
-        playerMediaRootPath:
-          process.env.PLAYER_MEDIA_ROOT_PATH ||
-          (PLAYER_API_URL ? '/tmp/cms-worker/player-media' : join(PLAYER_ROOT, 'media')),
+        playerMediaRootPath: resolvePlayerMediaRootPath(
+          process.env.PLAYER_MEDIA_ROOT_PATH,
+          PLAYER_ROOT,
+          PLAYER_API_URL,
+        ),
         s3Bucket:
           process.env.AWS_BUCKET_MEDIA || process.env.S3_BUCKET || process.env.AWS_BUCKET || '',
         syncStrategy: (process.env.MEDIA_SYNC_STRATEGY as any) || 'polling',
