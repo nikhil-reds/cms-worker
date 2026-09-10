@@ -33,6 +33,11 @@ export interface TargetDevice {
   tenantId: string;
 }
 
+export interface AuthenticatedPlayerDevice {
+  id: string;
+  tenantId: string;
+}
+
 export interface PlaylistPlaybackItem {
   id: string;
   type: 'video' | 'image' | 'audio' | 'html';
@@ -186,6 +191,32 @@ export class SchedulerDbService {
       ORDER BY d.name ASC
     `);
     return result.rows;
+  }
+
+  /**
+   * Validates the per-device credential sent by a Player when it opens its
+   * WebSocket. Device tokens are issued by the CMS at installation time; do
+   * not replace this with a shared gateway secret.
+   */
+  async authenticatePlayerDevice(
+    deviceId: string,
+    deviceToken: string,
+  ): Promise<AuthenticatedPlayerDevice | null> {
+    if (!deviceId || !deviceToken) return null;
+
+    const result = await this.pool.query(
+      `
+        SELECT d.id, d.tenant_id AS "tenantId"
+        FROM devices d
+        WHERE d.id = $1
+          AND d.device_token = $2
+          AND d.install_id IS NOT NULL
+        LIMIT 1
+      `,
+      [deviceId, deviceToken],
+    );
+
+    return result.rows[0] ?? null;
   }
 
   /**

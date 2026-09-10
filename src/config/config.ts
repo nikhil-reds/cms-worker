@@ -78,7 +78,6 @@ const EnvSchema = z.object({
   PLAYER_WS_ENABLED: z.coerce.boolean().default(false),
   PLAYER_WS_PORT: z.coerce.number().int().positive().default(3031),
   PLAYER_WS_PATH: z.string().default('/ws/player'),
-  PLAYER_WS_TOKEN: z.string().default(''),
   PLAYER_WS_HEARTBEAT_MS: z.coerce.number().int().positive().default(30000),
 
   // Logging

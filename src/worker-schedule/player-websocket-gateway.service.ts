@@ -26,6 +26,11 @@ interface ManifestUpdatedMessage {
   publishedAt: string;
 }
 
+interface AuthenticatedPlayer {
+  id: string;
+  tenantId: string;
+}
+
 @Injectable()
 export class PlayerWebSocketGatewayService implements OnApplicationShutdown {
   private server: Server | null = null;
@@ -39,9 +44,12 @@ export class PlayerWebSocketGatewayService implements OnApplicationShutdown {
   constructor(
     private readonly port: number,
     private readonly path: string,
-    private readonly token: string,
     private readonly heartbeatMs: number,
     private readonly enabled = false,
+    private readonly authenticateDevice: (
+      deviceId: string,
+      deviceToken: string,
+    ) => Promise<AuthenticatedPlayer | null>,
   ) {}
 
   async start(): Promise<void> {
@@ -57,19 +65,7 @@ export class PlayerWebSocketGatewayService implements OnApplicationShutdown {
     });
 
     this.wss.on('connection', (socket, request) => {
-      const url = new URL(request.url || this.path, `http://${request.headers.host}`);
-      const deviceId = url.searchParams.get('deviceId') || '';
-      const tenantId = url.searchParams.get('tenantId') || undefined;
-      const siteId = url.searchParams.get('siteId') || undefined;
-      const groupId = url.searchParams.get('groupId') || undefined;
-      const token = url.searchParams.get('token') || request.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
-
-      if (!deviceId || (this.token && token !== this.token)) {
-        socket.close(1008, 'Unauthorized');
-        return;
-      }
-
-      this.registerPlayer({ deviceId, tenantId, siteId, groupId }, socket);
+      void this.handleConnection(socket, request);
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -93,6 +89,27 @@ export class PlayerWebSocketGatewayService implements OnApplicationShutdown {
 
     this.heartbeatInterval = setInterval(() => this.checkHeartbeats(), this.heartbeatMs);
     logger.info(`Player WebSocket gateway listening on ${this.path} port ${this.port}`);
+  }
+
+  private async handleConnection(socket: WebSocket, request: import('http').IncomingMessage): Promise<void> {
+    try {
+      const url = new URL(request.url || this.path, `http://${request.headers.host}`);
+      const deviceId = url.searchParams.get('deviceId') || '';
+      const siteId = url.searchParams.get('siteId') || undefined;
+      const groupId = url.searchParams.get('groupId') || undefined;
+      const token = url.searchParams.get('token') || request.headers.authorization?.replace(/^Bearer\s+/i, '') || '';
+
+      const device = await this.authenticateDevice(deviceId, token);
+      if (!device) {
+        socket.close(1008, 'Unauthorized');
+        return;
+      }
+
+      this.registerPlayer({ deviceId: device.id, tenantId: device.tenantId, siteId, groupId }, socket);
+    } catch (error) {
+      logger.warn(`Player WebSocket authentication failed: ${error instanceof Error ? error.message : String(error)}`);
+      socket.close(1011, 'Authentication error');
+    }
   }
 
   notifyManifestUpdated(message: ManifestUpdatedMessage): boolean {

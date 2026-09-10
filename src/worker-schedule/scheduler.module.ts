@@ -113,14 +113,15 @@ const REDPANDA_BROKERS = (process.env.REDPANDA_BROKERS || 'localhost:29092')
     },
     {
       provide: PlayerWebSocketGatewayService,
-      useFactory: () =>
+      useFactory: (db: SchedulerDbService) =>
         new PlayerWebSocketGatewayService(
           Number.parseInt(process.env.PLAYER_WS_PORT || '3031', 10),
           process.env.PLAYER_WS_PATH || '/ws/player',
-          process.env.PLAYER_WS_TOKEN || '',
           Number.parseInt(process.env.PLAYER_WS_HEARTBEAT_MS || '30000', 10),
           process.env.PLAYER_WS_ENABLED === 'true',
+          (deviceId, deviceToken) => db.authenticatePlayerDevice(deviceId, deviceToken),
         ),
+      inject: [SchedulerDbService],
     },
     {
       provide: SchedulerQueueService,
