@@ -90,7 +90,7 @@ export class PlaylistDbService {
    * item ordering/durations, and media updated_at, so media re-processing
    * also triggers a re-render.
    */
-  async pollForChanges(): Promise<PendingPlaylist[]> {
+  async pollForChanges(playlistId?: string): Promise<PendingPlaylist[]> {
     const query = `
       WITH fingerprints AS (
         SELECT
@@ -125,6 +125,7 @@ export class PlaylistDbService {
       FROM fingerprints f
       LEFT JOIN player_playlist_render r ON r.playlist_id = f.id
       WHERE f."itemCount" > 0
+        AND ($2::text IS NULL OR f.id = $2)
         AND (
           r.playlist_id IS NULL
           OR r.source_hash IS DISTINCT FROM f."sourceHash"
@@ -135,7 +136,10 @@ export class PlaylistDbService {
       LIMIT 20
     `;
 
-    const result = await this.pool.query(query, [MAX_RENDER_ATTEMPTS]);
+    const result = await this.pool.query(query, [
+      MAX_RENDER_ATTEMPTS,
+      playlistId ?? null,
+    ]);
     return result.rows as PendingPlaylist[];
   }
 

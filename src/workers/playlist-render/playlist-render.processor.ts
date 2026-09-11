@@ -1,17 +1,22 @@
 import { Injectable, OnApplicationBootstrap, Logger } from '@nestjs/common';
 import { PlaylistRenderService } from './playlist-render.service';
+import { PlaylistRenderQueueService } from './playlist-render-queue.service';
 
 @Injectable()
 export class PlaylistRenderProcessor implements OnApplicationBootstrap {
   private readonly logger = new Logger('PlaylistRenderProcessor');
 
-  constructor(private playlistRenderService: PlaylistRenderService) {}
+  constructor(
+    private playlistRenderService: PlaylistRenderService,
+    private playlistRenderQueue: PlaylistRenderQueueService,
+  ) {}
 
   async onApplicationBootstrap(): Promise<void> {
     this.logger.log('⚡ Bootstrapping Playlist Render Worker');
 
     try {
       await this.playlistRenderService.start();
+      await this.playlistRenderQueue.start();
       this.logger.log('✓ Playlist Render Worker started successfully');
 
       // Log stats every minute

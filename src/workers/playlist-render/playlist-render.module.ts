@@ -7,6 +7,7 @@ import { FfmpegRenderService } from './ffmpeg-render.service';
 import { PlayerConfigService } from '../media-sync/player-config.service';
 import { PlaylistRenderConfig } from './playlist-render.types';
 import { SchedulerEvaluatePublisherService } from './scheduler-evaluate-publisher.service';
+import { PlaylistRenderQueueService } from './playlist-render-queue.service';
 import {
   defaultScratchDir,
   resolvePlayerMediaRootPath,
@@ -104,7 +105,7 @@ function parseResolution(value: string): { width: number; height: number } {
           process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672',
           process.env.RABBITMQ_SCHEDULER_EVALUATE_QUEUE ||
             'scheduler.evaluate.now',
-          process.env.RABBITMQ_ENABLED !== 'false',
+          process.env.RABBITMQ_ENABLED === 'true',
         ),
     },
     {
@@ -133,6 +134,24 @@ function parseResolution(value: string): { width: number; height: number } {
         SchedulerEvaluatePublisherService,
         'PLAYLIST_RENDER_CONFIG',
       ],
+    },
+    {
+      provide: PlaylistRenderQueueService,
+      useFactory: (renderer: PlaylistRenderService) =>
+        new PlaylistRenderQueueService(
+          renderer,
+          process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672',
+          process.env.RABBITMQ_PLAYLIST_RENDER_QUEUE ||
+            'playlist.render.requested',
+          process.env.RABBITMQ_PLAYLIST_RENDER_RETRY_QUEUE ||
+            'playlist.render.retry',
+          process.env.RABBITMQ_PLAYLIST_RENDER_DLQ ||
+            'playlist.render.dead_letter',
+          parseInt(process.env.RABBITMQ_PLAYLIST_RENDER_RETRY_DELAY_MS || '10000'),
+          parseInt(process.env.RABBITMQ_PLAYLIST_RENDER_MAX_RETRIES || '3'),
+          process.env.RABBITMQ_ENABLED === 'true',
+        ),
+      inject: [PlaylistRenderService],
     },
     PlaylistRenderProcessor,
   ],

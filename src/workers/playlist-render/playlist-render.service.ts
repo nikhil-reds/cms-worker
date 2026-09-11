@@ -30,7 +30,6 @@ const AUDIO_EXT = /\.(mp3|wav|aac|m4a|ogg)$/i;
 
 @Injectable()
 export class PlaylistRenderService implements OnApplicationShutdown {
-  private pollingInterval: NodeJS.Timeout | null = null;
   private isRunning = false;
   private activeRender: Promise<void> | null = null;
 
@@ -64,35 +63,19 @@ export class PlaylistRenderService implements OnApplicationShutdown {
       force: true,
     });
 
-    this.startPollingLoop();
     logger.info(
-      `Playlist Render Worker started (bucket=${this.config.playlistBucket}, ` +
+      `Playlist Render Worker started in RabbitMQ event mode (bucket=${this.config.playlistBucket}, ` +
         `mode=${this.config.playerConfigMode}, ${this.config.resolution.width}x${this.config.resolution.height}@${this.config.fps})`,
     );
   }
 
-  private startPollingLoop(): void {
-    logger.info(
-      `Starting polling loop (interval: ${this.config.pollIntervalMs}ms)`,
-    );
-
-    this.pollAndRender().catch((error) =>
-      logger.error('Error in polling', error),
-    );
-    this.pollingInterval = setInterval(() => {
-      this.pollAndRender().catch((error) =>
-        logger.error('Error in polling', error),
-      );
-    }, this.config.pollIntervalMs);
-  }
-
-  private async pollAndRender(): Promise<void> {
+  /** Render exactly the playlist named in a RabbitMQ job. */
+  async renderRequested(playlistId: string): Promise<void> {
     if (this.activeRender) {
-      logger.debug('Render already in progress, skipping poll cycle');
-      return;
+      throw new Error(`Cannot start render for ${playlistId}: another render is active`);
     }
 
-    this.activeRender = this.doPollAndRender();
+    this.activeRender = this.doRenderRequested(playlistId);
     try {
       await this.activeRender;
     } finally {
@@ -100,24 +83,16 @@ export class PlaylistRenderService implements OnApplicationShutdown {
     }
   }
 
-  private async doPollAndRender(): Promise<void> {
-    await this.cleanupDeletedPlaylists();
+  private async doRenderRequested(playlistId: string): Promise<void> {
+    if (!this.isRunning) throw new Error('Playlist render worker is not running');
 
-    const pending = await this.db.pollForChanges();
-    if (pending.length === 0) {
-      logger.debug('No playlists need rendering');
+    const playlist = (await this.db.pollForChanges(playlistId))[0];
+    if (!playlist) {
+      logger.info(`Playlist ${playlistId} does not need rendering; acknowledging job`);
       return;
     }
 
-    logger.info(`Found ${pending.length} playlist(s) to render`);
-
-    // Renders run one at a time — ffmpeg saturates the machine on its own.
-    for (const playlist of pending) {
-      if (!this.isRunning) break;
-      await this.renderPlaylist(playlist).catch((error) =>
-        logger.error(`Render error for ${playlist.id}: ${error}`),
-      );
-    }
+    await this.renderPlaylist(playlist);
   }
 
   private async renderPlaylist(pending: PendingPlaylist): Promise<void> {
@@ -202,6 +177,7 @@ export class PlaylistRenderService implements OnApplicationShutdown {
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       await this.db.markAsFailed(pending.id, errorMsg);
+      throw error;
     }
   }
 
@@ -368,11 +344,6 @@ export class PlaylistRenderService implements OnApplicationShutdown {
   async stop(): Promise<void> {
     logger.info('Stopping Playlist Render Worker');
     this.isRunning = false;
-
-    if (this.pollingInterval) {
-      clearInterval(this.pollingInterval);
-      this.pollingInterval = null;
-    }
 
     if (this.activeRender) {
       logger.info('Waiting for active render to finish');
