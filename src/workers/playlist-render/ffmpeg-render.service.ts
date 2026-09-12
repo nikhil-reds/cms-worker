@@ -621,16 +621,37 @@ export class FfmpegRenderService {
       child.stdout.on('data', (chunk) => (stdout += chunk));
       child.stderr.on('data', (chunk) => (stderr += chunk));
 
-      child.on('error', reject);
-      child.on('close', (code) => {
+      child.on('error', (error) => {
+        logger.error(
+          {
+            binary,
+            args,
+            error: error.message,
+          },
+          'FFmpeg process could not be started',
+        );
+        reject(error);
+      });
+      child.on('close', (code, signal) => {
         if (code === 0) {
           resolve(stdout);
         } else {
-          // ffmpeg puts diagnostics on stderr; keep the tail, it has the error
-          const tail = stderr.split('\n').slice(-8).join('\n');
+          // FFmpeg writes diagnostics to stderr. A null exit code means a signal
+          // ended the process, so preserve both the signal and a bounded tail.
+          const stderrTail = stderr.slice(-12_000);
+          logger.error(
+            {
+              binary,
+              args,
+              exitCode: code,
+              signal,
+              stderrTail,
+            },
+            'FFmpeg process failed',
+          );
           reject(
             new Error(
-              `${binary.split('/').pop()} exited with code ${code}:\n${tail}`,
+              `${binary.split('/').pop()} exited with code ${code}, signal ${signal ?? 'none'}:\n${stderrTail}`,
             ),
           );
         }
