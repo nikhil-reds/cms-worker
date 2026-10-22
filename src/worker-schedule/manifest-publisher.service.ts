@@ -6,7 +6,14 @@ const logger = createLogger('ManifestPublisherService');
 
 export interface PlayerManifestItem {
   id: string;
+  mediaId?: string;
+  mediaVersion?: string;
+  sha256?: string;
+  sizeBytes?: number;
   type: 'video' | 'image' | 'audio' | 'html';
+  zoneId?: string;
+  x?: number;
+  y?: number;
   src: string;
   url?: string;
   sourceType?: 'upload' | 'external_url';
@@ -25,24 +32,51 @@ export interface PlayerManifestItem {
 }
 
 export interface PlayerManifest {
-  schemaVersion: 1;
+  schemaVersion: 3;
   deviceId: string;
   revision: string;
   serverNow?: string;
-  playlist: PlayerManifestItem[];
-  playlists?: Array<{
-    id: string;
-    items: PlayerManifestItem[];
-  }>;
+  active?: PlayerManifestPlaylistRef | null;
   schedules?: Array<{
     id: string;
     name: string;
     playlistId: string;
+    playlistVersion: string;
     priority: number;
     startAt: string;
     endAt: string;
     daysOfWeek: number[];
   }>;
+}
+
+export interface PlayerManifestZone {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PlayerManifestCanvas {
+  width: number;
+  height: number;
+}
+
+export interface PlayerManifestPlaylistRef {
+  playlistId: string;
+  playlistVersion: string;
+}
+
+export interface PlaylistManifest {
+  schemaVersion: 3;
+  playlistId: string;
+  playlistVersion: string;
+  revision: string;
+  serverNow?: string;
+  canvas?: PlayerManifestCanvas;
+  zones?: PlayerManifestZone[];
+  items: PlayerManifestItem[];
 }
 
 @Injectable()
@@ -82,6 +116,20 @@ export class ManifestPublisherService {
     return `https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}`;
   }
 
+  playlistManifestKeyFor(playlistId: string, playlistVersion: string): string {
+    return `playlists/${encodeURIComponent(playlistId)}/v${encodeURIComponent(playlistVersion)}.json`;
+  }
+
+  playlistManifestUrlFor(playlistId: string, playlistVersion: string): string {
+    const key = this.playlistManifestKeyFor(playlistId, playlistVersion);
+
+    if (this.publicBaseUrl) {
+      return `${this.publicBaseUrl.replace(/\/$/, '')}/${key}`;
+    }
+
+    return `https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}`;
+  }
+
   async publish(manifest: PlayerManifest): Promise<string> {
     if (!this.enabled) {
       throw new Error('Player manifest publishing is not configured');
@@ -103,6 +151,35 @@ export class ManifestPublisherService {
     const manifestUrl = this.manifestUrlFor(manifest.deviceId);
     logger.info(
       `Published player manifest revision ${manifest.revision} to ${manifestUrl}`,
+    );
+
+    return manifestUrl;
+  }
+
+  async publishPlaylist(manifest: PlaylistManifest): Promise<string> {
+    if (!this.enabled) {
+      throw new Error('Player manifest publishing is not configured');
+    }
+    if (!manifest.playlistId || !manifest.playlistVersion) {
+      throw new Error('Cannot publish a playlist manifest without playlistId and playlistVersion');
+    }
+
+    await this.s3Client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: this.playlistManifestKeyFor(manifest.playlistId, manifest.playlistVersion),
+        Body: `${JSON.stringify(manifest, null, 2)}\n`,
+        ContentType: 'application/json',
+        CacheControl: 'public, max-age=31536000, immutable',
+      }),
+    );
+
+    const manifestUrl = this.playlistManifestUrlFor(
+      manifest.playlistId,
+      manifest.playlistVersion,
+    );
+    logger.info(
+      `Published playlist manifest ${manifest.playlistId}@${manifest.playlistVersion} to ${manifestUrl}`,
     );
 
     return manifestUrl;

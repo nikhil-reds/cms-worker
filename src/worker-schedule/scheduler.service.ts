@@ -9,6 +9,7 @@ import { SchedulerEventsService } from './scheduler-events.service';
 import { PlayerWebSocketGatewayService } from './player-websocket-gateway.service';
 import type { ScheduledJob, JobRunResult } from './scheduler.types';
 import type { SchedulerEvaluateNowJob } from './scheduler-job.types';
+import type { PlayerManifestItem } from './manifest-publisher.service';
 
 const logger = createLogger('SchedulerService');
 
@@ -186,28 +187,11 @@ export class SchedulerService implements OnApplicationShutdown {
         `switching to playlist ${active.playlistId} source=${source}`,
     );
 
-    const containsHtml = await this.db.playlistContainsHtml(active.playlistId);
-    const directItems = containsHtml ? await this.db.getPlaylistPlaybackItems(active.playlistId) : [];
-
-    if (containsHtml && directItems.length > 0) {
-      await this.publishOrApplyPlaylist(directItems, source);
-
-      this.lastActivePlaylistId = active.playlistId;
-      logger.info(`✓ Player now playing HTML-capable playlist "${active.name}" source=${source}`);
-
-      return {
-        changed: true,
-        activePlaylistId: active.playlistId,
-        activeScheduleId: active.id,
-      };
-    }
-
-    const rendered = await this.db.getPlaylistRenderOutput(active.playlistId);
-
-    if (!rendered) {
+    const directItems = await this.db.getPlaylistPlaybackItems(active.playlistId);
+    if (directItems.length === 0) {
       logger.warn(
         `Calendar "${active.name}" points to playlist ${active.playlistId}, ` +
-          `but no completed render found — skipping`,
+          `but no playable READY media was found — skipping`,
       );
       return {
         changed: false,
@@ -216,23 +200,12 @@ export class SchedulerService implements OnApplicationShutdown {
       };
     }
 
-    await this.publishOrApplyPlaylist([
-      {
-        id: active.playlistId,
-        type: 'video',
-        src: rendered.localSrc,
-        url: this.toPublicMediaUrl(rendered.s3Url),
-        loop: true,
-        muted: false,
-        fit: 'scale-down' as const,
-        position: 'center' as const,
-        width: rendered.displayWidth,
-        height: rendered.displayHeight,
-      },
-    ], source);
+    await this.publishOrApplyPlaylist(directItems, source);
 
     this.lastActivePlaylistId = active.playlistId;
-    logger.info(`✓ Player now playing "${active.name}" → ${rendered.s3Url} source=${source}`);
+    logger.info(
+      `✓ Player now playing native playlist "${active.name}" (${directItems.length} item(s)) source=${source}`,
+    );
 
     return {
       changed: true,
@@ -304,53 +277,59 @@ export class SchedulerService implements OnApplicationShutdown {
     activeScheduleId: string | null;
   }> {
     const schedules = await this.db.getPublishedSchedules(deviceId);
-    const playlists = await Promise.all(schedules.map(async (schedule) => {
-      if (schedule.hasHtml) {
-        return {
-          id: schedule.playlistId,
-          items: await this.db.getPlaylistPlaybackItems(schedule.playlistId),
-        };
-      }
-
-      if (!schedule.localSrc || !schedule.s3Url) {
-        return { id: schedule.playlistId, items: [] };
-      }
+    const playlistIds = [...new Set(schedules.map((schedule) => schedule.playlistId))];
+    const playlists = await Promise.all(playlistIds.map(async (playlistId) => {
+      const playbackManifest = await this.db.getPlaylistPlaybackManifest(playlistId);
+      const playlistVersion = this.playlistVersionFor(playbackManifest);
+      await this.manifestPublisher.publishPlaylist({
+        schemaVersion: 3,
+        playlistId,
+        playlistVersion,
+        revision: playlistVersion,
+        serverNow: new Date().toISOString(),
+        canvas: playbackManifest.canvas,
+        zones: playbackManifest.zones,
+        items: playbackManifest.items,
+      });
 
       return {
-        id: schedule.playlistId,
-        items: [
-          {
-            id: schedule.playlistId,
-            type: 'video' as const,
-            src: schedule.localSrc,
-            url: this.toPublicMediaUrl(schedule.s3Url),
-            loop: true,
-            muted: false,
-            fit: 'scale-down' as const,
-            position: 'center' as const,
-            width: schedule.displayWidth,
-            height: schedule.displayHeight,
-          },
-        ],
+        id: playlistId,
+        version: playlistVersion,
+        canvas: playbackManifest.canvas,
+        zones: playbackManifest.zones,
+        items: playbackManifest.items,
       };
     }));
 
-    const playlist = this.pickActivePlaylistFromSchedules(schedules, playlists);
+    const activeSchedule = this.pickActiveSchedule(schedules);
+    const activePlaylist = activeSchedule
+      ? playlists.find((candidate) => candidate.id === activeSchedule.playlistId)?.items ?? []
+      : [];
+    const activePlaylistVersion = activeSchedule
+      ? playlists.find((candidate) => candidate.id === activeSchedule.playlistId)?.version
+      : undefined;
     const scheduleEntries = schedules.map((schedule) => ({
       id: schedule.id,
       name: schedule.name,
       playlistId: schedule.playlistId,
+      playlistVersion:
+        playlists.find((candidate) => candidate.id === schedule.playlistId)?.version || 'missing',
       priority: schedule.priority,
       startAt: schedule.startAt.toISOString(),
       endAt: schedule.endAt.toISOString(),
       daysOfWeek: schedule.daysOfWeek,
     }));
     const manifestContent = {
-      schemaVersion: 1 as const,
+      schemaVersion: 3 as const,
       deviceId: deviceId,
       serverNow: new Date().toISOString(),
-      playlist,
-      playlists,
+      active:
+        activeSchedule && activePlaylistVersion
+          ? {
+              playlistId: activeSchedule.playlistId,
+              playlistVersion: activePlaylistVersion,
+            }
+          : null,
       schedules: scheduleEntries,
     };
     const contentHash = this.hashJson(manifestContent);
@@ -362,8 +341,8 @@ export class SchedulerService implements OnApplicationShutdown {
       );
       return {
         changed: false,
-        activePlaylistId: playlist[0]?.id || null,
-        activeScheduleId: scheduleEntries.find((schedule) => schedule.playlistId === playlist[0]?.id)?.id || null,
+        activePlaylistId: activeSchedule?.playlistId || null,
+        activeScheduleId: activeSchedule?.id || null,
       };
     }
 
@@ -386,7 +365,7 @@ export class SchedulerService implements OnApplicationShutdown {
       manifestUrl,
       manifestRevision: revision,
       contentHash,
-      playlistItemCount: playlist.length,
+      playlistItemCount: activePlaylist.length,
       source,
       occurredAt: new Date().toISOString(),
     });
@@ -407,35 +386,16 @@ export class SchedulerService implements OnApplicationShutdown {
 
     return {
       changed: true,
-      activePlaylistId: playlist[0]?.id || null,
-      activeScheduleId: scheduleEntries.find((schedule) => schedule.playlistId === playlist[0]?.id)?.id || null,
+      activePlaylistId: activeSchedule?.playlistId || null,
+      activeScheduleId: activeSchedule?.id || null,
     };
   }
 
-  private pickActivePlaylistFromSchedules(
+  private pickActiveSchedule(
     schedules: Awaited<ReturnType<SchedulerDbService['getPublishedSchedules']>>,
-    playlists: Array<{ id: string; items: Array<{
-      id: string;
-      type: 'video' | 'image' | 'audio' | 'html';
-      src: string;
-      url?: string;
-      sourceType?: 'upload' | 'external_url';
-      loop?: boolean;
-      muted?: boolean;
-      fit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
-      position?: 'center' | 'top' | 'bottom' | 'left' | 'right';
-      width?: number;
-      height?: number;
-      durationMs?: number;
-      navigationPolicy?: 'same_origin' | 'allowlist' | 'allow_all';
-      navigationAllowlist?: string[];
-      reloadPolicy?: 'on_each_play' | 'once_per_playlist' | 'interval' | 'never';
-      reloadIntervalMs?: number;
-      loadTimeoutMs?: number;
-    }> }>,
   ) {
     const now = new Date();
-    const active = schedules.find((schedule) => {
+    return schedules.find((schedule) => {
       const start = schedule.startAt.getTime();
       const end = schedule.endAt.getTime();
       return (
@@ -444,32 +404,12 @@ export class SchedulerService implements OnApplicationShutdown {
         this.matchesDayOfWeek(schedule.daysOfWeek, now)
       );
     });
-
-    if (!active) return [];
-
-    if (active.hasHtml) {
-      return playlists.find((playlist) => playlist.id === active.playlistId)?.items ?? [];
-    }
-
-    return [
-      {
-        id: active.playlistId,
-        type: 'video' as const,
-        src: active.localSrc || '',
-        url: active.s3Url ? this.toPublicMediaUrl(active.s3Url) : '',
-        loop: true,
-        muted: false,
-        fit: 'scale-down' as const,
-        position: 'center' as const,
-        width: active.displayWidth,
-        height: active.displayHeight,
-      },
-    ];
   }
 
   private async publishOrApplyPlaylist(
     playlist: Array<{
       id: string;
+      mediaId?: string;
       type: 'video' | 'image' | 'audio' | 'html';
       src: string;
       url?: string;
@@ -509,6 +449,7 @@ export class SchedulerService implements OnApplicationShutdown {
           }
           return {
             id: item.id,
+            mediaId: item.mediaId,
             type: item.type,
             src: item.src,
             url: item.url ?? (isExternalHtml ? item.src : undefined),
@@ -527,13 +468,28 @@ export class SchedulerService implements OnApplicationShutdown {
             loadTimeoutMs: item.loadTimeoutMs,
           };
         });
+        const playlistId = `direct-${this.deviceId}`;
+        const playlistVersion = this.playlistVersionFor(manifestPlaylist);
+        await this.manifestPublisher.publishPlaylist({
+          schemaVersion: 3,
+          playlistId,
+          playlistVersion,
+          revision: playlistVersion,
+          serverNow: new Date().toISOString(),
+          items: manifestPlaylist,
+        });
 
         const manifestUrl = await this.manifestPublisher.publish({
-        schemaVersion: 1,
-        deviceId: this.deviceId,
-        revision,
-        playlist: manifestPlaylist,
-      });
+          schemaVersion: 3,
+          deviceId: this.deviceId,
+          revision,
+          serverNow: new Date().toISOString(),
+          active: {
+            playlistId,
+            playlistVersion,
+          },
+          schedules: [],
+        });
 
         await this.redis.setManifestState(this.deviceId, {
           contentHash,
@@ -605,22 +561,8 @@ export class SchedulerService implements OnApplicationShutdown {
       .digest('hex');
   }
 
-  private toPublicMediaUrl(url: string): string {
-    if (!this.cdnBaseUrl) return url;
-
-    const cdnBase = this.cdnBaseUrl.replace(/\/$/, '');
-    const s3Bases = [
-      `https://${this.processedBucket}.s3.${this.awsRegion}.amazonaws.com`,
-      `https://${this.processedBucket}.s3.amazonaws.com`,
-    ];
-
-    for (const s3Base of s3Bases) {
-      if (url.startsWith(s3Base)) {
-        return `${cdnBase}${url.slice(s3Base.length)}`;
-      }
-    }
-
-    return url;
+  private playlistVersionFor(content: PlayerManifestItem[] | unknown): string {
+    return this.hashJson(content).slice(0, 16);
   }
 
   private matchesDayOfWeek(daysOfWeek: number[], date: Date): boolean {

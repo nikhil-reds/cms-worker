@@ -826,7 +826,7 @@ safe target: 1s - 2s
 
 ### 16.3 Separate Fast Schedule Switching From Heavy Rendering
 
-Playlist rendering with ffmpeg cannot always fit inside 1 to 2 seconds. Separate the fast control plane from heavy media processing.
+Playlist publishing and media preparation cannot always fit inside 1 to 2 seconds. Separate the fast control plane from heavy media processing.
 
 ```text
 Fast path
@@ -866,7 +866,7 @@ RabbitMQ queues by latency
 │  └─ target: seconds to minutes depending on file size
 └─ playlist.render.now
    ├─ priority: lower
-   └─ target: depends on ffmpeg duration
+   └─ target: depends on media preparation duration
 ```
 
 Worker pools:
@@ -989,7 +989,7 @@ Already-rendered content/schedule switch
 
 Newly-rendered content
 ├─ measured separately
-└─ depends on media duration, file size, ffmpeg speed, and upload time
+└─ depends on media duration, file size, processing speed, and upload time
 ```
 
 ## 17. Target Sub-Second Player Update Architecture

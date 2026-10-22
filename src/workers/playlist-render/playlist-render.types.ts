@@ -3,7 +3,7 @@ import { z } from 'zod';
 /**
  * Shape of the playlist JSON the CMS writes to
  * s3://{S3_BUCKET_PLAYLIST}/playlists/{id}.json (serializePlaylist in the
- * CMS playlist API routes). Only the fields the renderer needs are declared;
+ * CMS playlist API routes). Only the fields the publisher needs are declared;
  * unknown fields pass through.
  *
  * Note: media.cdnUrl in this JSON points at the PRIVATE media bucket and is
@@ -63,7 +63,7 @@ export const PlaylistJsonSchema = z.object({
 export type PlaylistJson = z.infer<typeof PlaylistJsonSchema>;
 export type PlaylistJsonItem = z.infer<typeof PlaylistItemSchema>;
 
-/** A playlist row that needs (re-)rendering, as detected by the poll query. */
+/** A playlist row that needs publishing, as detected by the poll query. */
 export interface PendingPlaylist {
   id: string;
   tenantId: string;
@@ -74,63 +74,15 @@ export interface PendingPlaylist {
 }
 
 export type MediaKind = 'video' | 'image' | 'audio';
-export type MediaFit = 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
-export type MediaPosition = 'center' | 'top' | 'bottom' | 'left' | 'right';
-
-/** A playlist item whose media file has been located on local disk. */
-export interface ResolvedItem {
-  mediaId: string;
-  position: number;
-  durationSec: number;
-  fit: MediaFit;
-  objectPosition: MediaPosition;
-  zoneId: string;
-  kind: MediaKind;
-  localPath: string;
-}
-
-export interface RenderOutput {
-  outputPath: string;
-  durationSec: number;
-}
-
-export interface RenderResolution {
-  width: number;
-  height: number;
-}
-
-export interface RenderZone {
-  id: string;
-  name: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-/** Where a completed render ended up (local player + S3). */
-export interface InstalledRender {
-  localSrc: string; // relative to player root, e.g. media/videos/playlist-{id}.mp4
-  s3Key: string; // key in the processed bucket, e.g. playlists/{id}.mp4
-  s3Url: string;
-}
-
 export interface PlaylistRenderConfig {
   playerRootPath: string;
   playerMediaRootPath: string;
   mediaBucket: string; // media binaries (uploads/...)
   playlistBucket: string; // playlist JSON (playlists/{id}.json)
-  processedBucket: string; // rendered playlist MP4s are uploaded here
+  processedBucket: string; // legacy processed bucket, retained for old tracking cleanup
   pollIntervalMs: number;
-  resolution: RenderResolution;
-  fps: number;
-  /** append: rendered video joins existing player playlist entries.
+  /** append: native items join existing player playlist entries.
    *  exclusive: rendered video replaces the whole player playlist. */
   playerConfigMode: 'append' | 'exclusive';
-  /** natural: a source video shorter than durationSec plays once.
-   *  loop: it loops until durationSec is filled. */
-  shortVideoBehavior: 'natural' | 'loop';
   scratchDir: string;
-  ffmpegPath: string;
-  ffprobePath: string;
 }

@@ -17,7 +17,7 @@ const logger = createLogger('PlaylistS3Service');
  *  - playlist JSON from the playlist bucket (playlists/{id}.json)
  *  - media binaries from the media bucket (by s3Key — the cdnUrl inside the
  *    JSON points at the private bucket and is never fetched directly)
- *  - rendered MP4s uploaded to the processed bucket
+ *  - legacy processed uploads for explicit media-processing workflows
  */
 @Injectable()
 export class PlaylistS3Service {
@@ -128,6 +128,11 @@ export class PlaylistS3Service {
     const url = `${baseUrl.replace(/\/$/, '')}/${s3Key}`;
     logger.info(`✓ Uploaded to ${url}`);
     return url;
+  }
+
+  publicUrlFor(bucket: string, s3Key: string): string {
+    const baseUrl = this.publicBaseUrl || `https://${bucket}.s3.${this.region}.amazonaws.com`;
+    return `${baseUrl.replace(/\/$/, '')}/${s3Key.replace(/^\//, '')}`;
   }
 
   /** Delete an object (used when a playlist is removed in the CMS). */

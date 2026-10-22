@@ -19,12 +19,6 @@ export interface PublishedSchedule {
   startAt: Date;
   endAt: Date;
   daysOfWeek: number[];
-  localSrc: string | null;
-  s3Key: string | null;
-  s3Url: string | null;
-  displayWidth: number;
-  displayHeight: number;
-  hasHtml: boolean;
 }
 
 export interface TargetDevice {
@@ -40,7 +34,14 @@ export interface AuthenticatedPlayerDevice {
 
 export interface PlaylistPlaybackItem {
   id: string;
+  mediaId?: string;
+  mediaVersion?: string;
+  sha256?: string;
+  sizeBytes?: number;
   type: 'video' | 'image' | 'audio' | 'html';
+  zoneId?: string;
+  x?: number;
+  y?: number;
   src: string;
   url?: string;
   sourceType?: 'upload' | 'external_url';
@@ -51,6 +52,22 @@ export interface PlaylistPlaybackItem {
   durationMs?: number;
   navigationPolicy?: 'same_origin' | 'allowlist' | 'allow_all';
   reloadPolicy?: 'on_each_play' | 'once_per_playlist' | 'interval' | 'never';
+}
+
+export interface PlaylistZone {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PlaylistPlaybackManifest {
+  playlistId: string;
+  canvas: { width: number; height: number };
+  zones: PlaylistZone[];
+  items: PlaylistPlaybackItem[];
 }
 
 /**
@@ -101,44 +118,43 @@ export class SchedulerDbService {
     return result.rows[0];
   }
 
-  /**
-   * Get the rendered playlist MP4 for a given playlist (its S3 key from
-   * the playlist-render worker's tracking table).
-   */
-  async getPlaylistRenderOutput(playlistId: string): Promise<{
-    localSrc: string;
-    s3Key: string;
-    s3Url: string;
-    displayWidth: number;
-    displayHeight: number;
-  } | null> {
-    const query = `
-      SELECT
-        output_path     AS "localSrc",
-        s3_key          AS "s3Key",
-        s3_url          AS "s3Url",
-        p.display_width AS "displayWidth",
-        p.display_height AS "displayHeight"
-      FROM player_playlist_render r
-      INNER JOIN playlists p ON p.id = r.playlist_id
-      WHERE r.playlist_id = $1
-        AND r.render_status = 'completed'
-    `;
-
-    const result = await this.pool.query(query, [playlistId]);
-    if (result.rows.length === 0) return null;
-    return result.rows[0];
+  async getPlaylistPlaybackItems(playlistId: string): Promise<PlaylistPlaybackItem[]> {
+    return (await this.getPlaylistPlaybackManifest(playlistId)).items;
   }
 
-  async getPlaylistPlaybackItems(playlistId: string): Promise<PlaylistPlaybackItem[]> {
+  async getPlaylistPlaybackManifest(playlistId: string): Promise<PlaylistPlaybackManifest> {
+    const playlistResult = await this.pool.query(
+      `
+      SELECT
+        id,
+        display_width AS "displayWidth",
+        display_height AS "displayHeight",
+        zones_json AS "zonesJson"
+      FROM playlists
+      WHERE id = $1
+      `,
+      [playlistId],
+    );
+    const playlist = playlistResult.rows[0];
+    const canvas = {
+      width: Number(playlist?.displayWidth) || 1920,
+      height: Number(playlist?.displayHeight) || 1080,
+    };
+    const zones = this.normalizeZones(playlist?.zonesJson, canvas);
+    const zoneMap = new Map(zones.map((zone) => [zone.id, zone]));
+
     const query = `
       SELECT
-        pi.media_id AS "id",
+        pi.id AS "id",
+        pi.media_id AS "mediaId",
         pi.duration_sec AS "durationSec",
         pi.fit,
         pi.object_position AS "position",
+        COALESCE(pi.zone_id, 'full-screen') AS "zoneId",
         m.filename,
         m.cdn_url AS "cdnUrl",
+        m.size_bytes AS "sizeBytes",
+        m.updated_at AS "mediaUpdatedAt",
         COALESCE(m.source_type, 'upload') AS "sourceType",
         m.external_url AS "externalUrl",
         m.width,
@@ -153,29 +169,16 @@ export class SchedulerDbService {
     `;
 
     const result = await this.pool.query(query, [playlistId]);
-    return result.rows.map((row) => this.mapPlaybackItem(row));
-  }
-
-  async playlistContainsHtml(playlistId: string): Promise<boolean> {
-    const result = await this.pool.query(
-      `
-      SELECT EXISTS (
-        SELECT 1
-        FROM playlist_items pi
-        JOIN media m ON m.id = pi.media_id
-        LEFT JOIN media_types mt ON mt.id = m.media_type_id
-        WHERE pi.playlist_id = $1
-          AND m.status = 'READY'
-          AND (
-            mt.name = 'html'
-            OR COALESCE(m.source_type, 'upload') = 'external_url'
-            OR m.filename ~* '\\.(html|htm|zip)$'
-          )
-      ) AS "hasHtml"
-      `,
-      [playlistId],
+    const items = result.rows.map((row) =>
+      this.mapPlaybackItem(row, zoneMap, zones[0]),
     );
-    return Boolean(result.rows[0]?.hasHtml);
+
+    return {
+      playlistId,
+      canvas,
+      zones,
+      items,
+    };
   }
 
   /**
@@ -244,55 +247,27 @@ export class SchedulerDbService {
         c.priority,
         c.start_time AT TIME ZONE 'UTC' AS "startAt",
         c.end_time   AT TIME ZONE 'UTC' AS "endAt",
-        c.days_of_week    AS "daysOfWeek",
-        r.output_path     AS "localSrc",
-        r.s3_key          AS "s3Key",
-        r.s3_url          AS "s3Url",
-        p.display_width   AS "displayWidth",
-        p.display_height  AS "displayHeight",
-        EXISTS (
-          SELECT 1
-          FROM playlist_items pi
-          JOIN media m ON m.id = pi.media_id
-          LEFT JOIN media_types mt ON mt.id = m.media_type_id
-          WHERE pi.playlist_id = c.playlist_id
-            AND m.status = 'READY'
-            AND (
-              mt.name = 'html'
-              OR COALESCE(m.source_type, 'upload') = 'external_url'
-              OR m.filename ~* '\\.(html|htm|zip)$'
-            )
-        ) AS "hasHtml"
+        c.days_of_week    AS "daysOfWeek"
       FROM calendars c
       INNER JOIN playlists p ON p.id = c.playlist_id
-      LEFT JOIN player_playlist_render r ON r.playlist_id = c.playlist_id
       WHERE c.status = 'ACTIVE'
         AND EXISTS (
           SELECT 1
           FROM "_CalendarToDevice" cd
           WHERE cd."A" = c.id AND cd."B" = $1
         )
-        AND (
-          (r.render_status = 'completed' AND r.s3_url IS NOT NULL)
-          OR EXISTS (
-            SELECT 1
-            FROM playlist_items pi
-            JOIN media m ON m.id = pi.media_id
-            LEFT JOIN media_types mt ON mt.id = m.media_type_id
-            WHERE pi.playlist_id = c.playlist_id
-              AND m.status = 'READY'
-              AND (
-                mt.name = 'html'
-                OR COALESCE(m.source_type, 'upload') = 'external_url'
-                OR m.filename ~* '\\.(html|htm|zip)$'
-              )
-          )
+        AND EXISTS (
+          SELECT 1
+          FROM playlist_items pi
+          JOIN media m ON m.id = pi.media_id
+          WHERE pi.playlist_id = c.playlist_id
+            AND m.status = 'READY'
         )
       ORDER BY c.priority DESC, c.start_time ASC
     `;
 
     const result = await this.pool.query(query, [deviceId]);
-    return result.rows.map((row) => ({ ...row, hasHtml: Boolean(row.hasHtml) }));
+    return result.rows;
   }
 
   async close(): Promise<void> {
@@ -304,9 +279,11 @@ export class SchedulerDbService {
 
   private mapPlaybackItem(row: {
     id: string;
+    mediaId: string;
     durationSec: number | null;
     fit: PlaylistPlaybackItem['fit'] | null;
     position: PlaylistPlaybackItem['position'] | null;
+    zoneId: string | null;
     filename: string;
     cdnUrl: string | null;
     sourceType: string;
@@ -314,9 +291,13 @@ export class SchedulerDbService {
     width: number | null;
     height: number | null;
     mediaTypeName: string | null;
-  }): PlaylistPlaybackItem {
+    sizeBytes: string | number | null;
+    mediaUpdatedAt: Date | string | null;
+  }, zoneMap: Map<string, PlaylistZone>, fallbackZone: PlaylistZone): PlaylistPlaybackItem {
     const type = this.detectPlayerType(row.mediaTypeName, row.filename);
     const sourceType = row.sourceType === 'external_url' ? 'external_url' : 'upload';
+    const sizeBytes = row.sizeBytes === null ? undefined : Number(row.sizeBytes);
+    const zone = zoneMap.get(row.zoneId || '') ?? fallbackZone;
     const src = sourceType === 'external_url'
       ? row.externalUrl || ''
       : type === 'html'
@@ -326,17 +307,72 @@ export class SchedulerDbService {
 
     return {
       id: row.id,
+      mediaId: row.mediaId,
+      mediaVersion: row.mediaUpdatedAt ? new Date(row.mediaUpdatedAt).toISOString() : undefined,
+      sizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : undefined,
       type,
+      zoneId: zone.id,
+      x: zone.x,
+      y: zone.y,
       src,
       url,
       sourceType,
       fit: row.fit ?? (type === 'html' ? 'contain' : 'scale-down'),
       position: row.position ?? 'center',
-      width: row.width === null ? undefined : Number(row.width),
-      height: row.height === null ? undefined : Number(row.height),
+      width: zone.width,
+      height: zone.height,
       durationMs: row.durationSec ? Number(row.durationSec) * 1000 : type === 'html' ? 20000 : type === 'image' ? 8000 : undefined,
       ...(type === 'html' ? { navigationPolicy: 'same_origin' as const, reloadPolicy: 'on_each_play' as const } : {}),
     };
+  }
+
+  private normalizeZones(rawZones: unknown, canvas: { width: number; height: number }): PlaylistZone[] {
+    const fallback: PlaylistZone = {
+      id: 'full-screen',
+      name: 'Full Screen',
+      x: 0,
+      y: 0,
+      width: canvas.width,
+      height: canvas.height,
+    };
+
+    const parsed = Array.isArray(rawZones)
+      ? rawZones
+      : typeof rawZones === 'string'
+        ? this.parseZonesJson(rawZones)
+        : [];
+
+    const zones = parsed
+      .map((zone: any): PlaylistZone | null => {
+        const id = String(zone?.id || '').trim();
+        const x = Number(zone?.x ?? zone?.left ?? 0);
+        const y = Number(zone?.y ?? zone?.top ?? 0);
+        const width = Number(zone?.width ?? zone?.w);
+        const height = Number(zone?.height ?? zone?.h);
+        if (!id || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+          return null;
+        }
+        return {
+          id,
+          name: String(zone?.name || id),
+          x,
+          y,
+          width,
+          height,
+        };
+      })
+      .filter((zone): zone is PlaylistZone => Boolean(zone));
+
+    return zones.length > 0 ? zones : [fallback];
+  }
+
+  private parseZonesJson(raw: string): unknown[] {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
   }
 
   private detectPlayerType(mediaTypeName: string | null, filename: string): 'video' | 'image' | 'audio' | 'html' {

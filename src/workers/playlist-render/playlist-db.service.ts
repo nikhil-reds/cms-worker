@@ -13,10 +13,10 @@ const STALE_RENDER_TIMEOUT_MS = 30 * 60 * 1000;
 /**
  * Watches the CMS playlists / playlist_items / media tables for changes.
  *
- * The CMS schema (Prisma-managed) is never modified. Render state lives in
+ * The CMS schema (Prisma-managed) is never modified. Publish state lives in
  * one worker-owned table, `player_playlist_render`, keyed by playlist id and
- * a content fingerprint: a playlist needs rendering when its fingerprint
- * differs from the last completed render.
+ * a content fingerprint. The table name is historical; the current worker
+ * publishes native Player playlist entries instead of rendering one MP4.
  */
 @Injectable()
 export class PlaylistDbService {
@@ -257,7 +257,7 @@ export class PlaylistDbService {
   async markAsCompleted(
     playlistId: string,
     sourceHash: string,
-    outputPath: string,
+    outputPath: string | null,
     durationSec: number,
     s3Key: string,
     s3Url: string,

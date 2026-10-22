@@ -5,7 +5,7 @@ A headless NestJS background worker fleet for the CMS platform. One codebase, mu
 | Role | Status | Purpose |
 |---|---|---|
 | `media-sync` | ✅ **Working** | Sync S3 media to the Player and auto-play it |
-| `playlist-render` | ✅ **Working** | Render CMS playlists into a single MP4 with ffmpeg and auto-play it in the Player |
+| `playlist-render` | ✅ **Working** | Publish CMS playlists as native Player item lists; FFmpeg is not used for playlist playback |
 | `notification` | 🚧 Skeleton | Emails, webhooks, push, internal alerts (device offline, sync failures, …) |
 | `analytics` | 🚧 Skeleton | Telemetry ingestion: heartbeats, proof-of-play, batch inserts, rollups |
 | `sensor` | 🚧 Skeleton | Sensor events (motion, proximity, …) → rule engine → playback/notify actions |
@@ -21,9 +21,9 @@ At scale, deploy separate replicas per role so heavy analytics ingestion never b
 
 ---
 
-# Playlist Render Worker
+# Playlist Publish Worker
 
-Watches the CMS `playlists` / `playlist_items` / `media` tables (polling, 30 s), pulls the playlist JSON the CMS writes to S3 (`AWS_BUCKET_PLAYLIST`, key `playlists/{id}.json`), renders the whole playlist into **one MP4** with ffmpeg, and installs it into the Player so it plays automatically.
+Watches the CMS `playlists` / `playlist_items` / `media` tables, pulls the playlist JSON the CMS writes to S3 (`AWS_BUCKET_PLAYLIST`, key `playlists/{id}.json`), and publishes the playlist as individual native Player items. The Worker does **not** concatenate playlist media into one MP4.
 
 ```
 CMS saves playlist ──► Postgres + S3 playlists/{id}.json
@@ -32,20 +32,17 @@ CMS saves playlist ──► Postgres + S3 playlists/{id}.json
         player_playlist_render table — CMS schema never modified)
                                 │
    1. fetch playlists/{id}.json (falls back to DB if missing/invalid)
-   2. resolve media: reuse files media-sync already downloaded,
-      else stream from S3 by s3Key (never the private cdnUrl)
-   3. normalize every item to a uniform H.264/AAC segment
-      (images shown durationSec, videos trimmed, silent audio injected;
-      segments cached — editing 1 item re-encodes only that item)
-   4. concat segments (stream copy) → playlist-{id}.mp4, ffprobe-validated
-   5. upload to s3://AWS_BUCKET_MEDIA_PROCESSED/playlists/{id}.mp4
-   6. atomic install into player/media/videos/ + config.json entry
+   2. convert READY video/image/audio items to Player playlist entries
+   3. preserve item order, duration, fit, position, and display dimensions
+   4. publish immutable playlist manifests at playlists/{playlistId}/v{version}.json
+   5. publish small device manifests that reference playlist id + version
+   6. Player resolves playlist manifests, downloads/caches each asset, and plays sequentially
 ```
 
-- Re-renders automatically when items/order/durations change; deleting the playlist in the CMS removes the MP4 and its player entry.
-- Failed renders retry up to 3 times, then dead-letter until the playlist changes again.
-- `PLAYLIST_RENDER_MODE=append` (default) adds the rendered video alongside existing player entries; `exclusive` makes it the only playlist entry.
-- Verify the ffmpeg pipeline without DB/S3: `npm run smoke:render`.
+- Republishes automatically when items/order/durations change.
+- Failed publishes retry up to 3 times, then dead-letter until the playlist changes again.
+- `PLAYLIST_RENDER_MODE=append` (default) adds native item entries alongside existing player entries; `exclusive` makes them the only local player entries.
+- FFmpeg is not part of the CMS worker playlist flow.
 
 ---
 
@@ -260,9 +257,11 @@ PLAYER_SYNC_INTERVAL_MS=30000 \
 npm start
 ```
 
-When `PLAYER_MANIFEST_BUCKET` is configured, the scheduler publishes the active
-playlist manifest to S3. The player then pulls the manifest, downloads the
-rendered MP4 locally, and switches playback only after the file is cached.
+When `PLAYER_MANIFEST_BUCKET` is configured, the scheduler publishes immutable
+playlist manifests plus a small per-device manifest to S3. The player pulls the
+device manifest, derives `/playlists/{playlistId}/v{playlistVersion}.json`,
+downloads the individual media assets locally, verifies size/hash when present,
+and switches playback only after the required files are cached.
 
 Healthy startup logs look like:
 

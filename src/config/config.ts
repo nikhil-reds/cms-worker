@@ -43,9 +43,6 @@ const EnvSchema = z.object({
   PLAYLIST_RENDER_MODE: z.enum(['append', 'exclusive']).default('append').describe('append: add to player playlist; exclusive: replace it'),
   PLAYLIST_RENDER_SHORT_VIDEO: z.enum(['natural', 'loop']).default('natural').describe('Videos shorter than their item duration: play once or loop to fill'),
   PLAYLIST_RENDER_SCRATCH_DIR: z.string().default(defaultScratchDir()),
-  FFMPEG_PATH: z.string().optional().describe('Override for the bundled ffmpeg binary'),
-  FFPROBE_PATH: z.string().optional().describe('Override for the bundled ffprobe binary'),
-
   // Scheduler realtime infrastructure
   REDIS_ENABLED: z.coerce.boolean().default(true),
   REDIS_URL: z.string().default('redis://localhost:6379'),

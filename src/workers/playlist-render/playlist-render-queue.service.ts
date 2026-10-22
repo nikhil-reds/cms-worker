@@ -42,7 +42,7 @@ export class PlaylistRenderQueueService implements OnApplicationShutdown {
     this.connection = await amqp.connect(this.rabbitmqUrl);
     this.channel = await this.connection.createChannel();
     await this.assertQueues(this.channel);
-    // ffmpeg is CPU intensive; deliberately process a single render at once.
+    // Keep playlist publish jobs serialized so config/manifest updates stay ordered.
     await this.channel.prefetch(1);
 
     const result = await this.channel.consume(

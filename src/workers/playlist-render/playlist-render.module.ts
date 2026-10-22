@@ -3,7 +3,6 @@ import { PlaylistRenderProcessor } from './playlist-render.processor';
 import { PlaylistRenderService } from './playlist-render.service';
 import { PlaylistDbService } from './playlist-db.service';
 import { PlaylistS3Service } from './playlist-s3.service';
-import { FfmpegRenderService } from './ffmpeg-render.service';
 import { PlayerConfigService } from '../media-sync/player-config.service';
 import { PlaylistRenderConfig } from './playlist-render.types';
 import { SchedulerEvaluatePublisherService } from './scheduler-evaluate-publisher.service';
@@ -14,19 +13,8 @@ import {
   resolvePlayerRootPath,
 } from '../../config/paths';
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const ffmpegStatic: string | null = require('ffmpeg-static');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const ffprobeStatic: { path: string } = require('ffprobe-static');
-
 const PLAYER_ROOT = resolvePlayerRootPath(process.env.PLAYER_ROOT_PATH);
 const PLAYER_API_URL = (process.env.PLAYER_API_URL || '').replace(/\/$/, '');
-
-function parseResolution(value: string): { width: number; height: number } {
-  const match = /^(\d+)x(\d+)$/.exec(value);
-  if (!match) return { width: 1920, height: 1080 };
-  return { width: parseInt(match[1]), height: parseInt(match[2]) };
-}
 
 @Module({
   providers: [
@@ -52,18 +40,9 @@ function parseResolution(value: string): { width: number; height: number } {
         pollIntervalMs: parseInt(
           process.env.PLAYLIST_RENDER_INTERVAL_MS || '30000',
         ),
-        resolution: parseResolution(
-          process.env.PLAYLIST_RENDER_RESOLUTION || '1920x1080',
-        ),
-        fps: parseInt(process.env.PLAYLIST_RENDER_FPS || '30'),
         playerConfigMode: (process.env.PLAYLIST_RENDER_MODE as any) || 'append',
-        shortVideoBehavior:
-          (process.env.PLAYLIST_RENDER_SHORT_VIDEO as any) || 'natural',
         scratchDir:
           process.env.PLAYLIST_RENDER_SCRATCH_DIR || defaultScratchDir(),
-        ffmpegPath: process.env.FFMPEG_PATH || ffmpegStatic || 'ffmpeg',
-        ffprobePath:
-          process.env.FFPROBE_PATH || ffprobeStatic.path || 'ffprobe',
       }),
     },
     {
@@ -93,12 +72,6 @@ function parseResolution(value: string): { width: number; height: number } {
         ),
     },
     {
-      provide: FfmpegRenderService,
-      useFactory: (config: PlaylistRenderConfig) =>
-        new FfmpegRenderService(config),
-      inject: ['PLAYLIST_RENDER_CONFIG'],
-    },
-    {
       provide: SchedulerEvaluatePublisherService,
       useFactory: () =>
         new SchedulerEvaluatePublisherService(
@@ -113,7 +86,6 @@ function parseResolution(value: string): { width: number; height: number } {
       useFactory: (
         db: PlaylistDbService,
         s3: PlaylistS3Service,
-        renderer: FfmpegRenderService,
         playerConfig: PlayerConfigService,
         schedulerPublisher: SchedulerEvaluatePublisherService,
         config: PlaylistRenderConfig,
@@ -121,7 +93,6 @@ function parseResolution(value: string): { width: number; height: number } {
         new PlaylistRenderService(
           db,
           s3,
-          renderer,
           playerConfig,
           schedulerPublisher,
           config,
@@ -129,7 +100,6 @@ function parseResolution(value: string): { width: number; height: number } {
       inject: [
         PlaylistDbService,
         PlaylistS3Service,
-        FfmpegRenderService,
         PlayerConfigService,
         SchedulerEvaluatePublisherService,
         'PLAYLIST_RENDER_CONFIG',

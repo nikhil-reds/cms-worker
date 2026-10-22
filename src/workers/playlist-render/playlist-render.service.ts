@@ -1,25 +1,16 @@
 import { Injectable, OnApplicationShutdown } from '@nestjs/common';
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  renameSync,
-  rmSync,
-  unlinkSync,
-} from 'fs';
-import { join } from 'path';
+import { mkdirSync, rmSync } from 'fs';
+import { basename, join } from 'path';
 import { createLogger } from '../../common/logger';
 import { PlayerConfigService } from '../media-sync/player-config.service';
 import { PlaylistDbService } from './playlist-db.service';
 import { PlaylistS3Service } from './playlist-s3.service';
-import { FfmpegRenderService } from './ffmpeg-render.service';
 import { SchedulerEvaluatePublisherService } from './scheduler-evaluate-publisher.service';
 import type {
   MediaKind,
   PendingPlaylist,
   PlaylistJson,
   PlaylistRenderConfig,
-  ResolvedItem,
 } from './playlist-render.types';
 
 const logger = createLogger('PlaylistRenderService');
@@ -36,7 +27,6 @@ export class PlaylistRenderService implements OnApplicationShutdown {
   constructor(
     private db: PlaylistDbService,
     private s3: PlaylistS3Service,
-    private renderer: FfmpegRenderService,
     private playerConfig: PlayerConfigService,
     private schedulerPublisher: SchedulerEvaluatePublisherService,
     private config: PlaylistRenderConfig,
@@ -64,15 +54,15 @@ export class PlaylistRenderService implements OnApplicationShutdown {
     });
 
     logger.info(
-      `Playlist Render Worker started in RabbitMQ event mode (bucket=${this.config.playlistBucket}, ` +
-        `mode=${this.config.playerConfigMode}, ${this.config.resolution.width}x${this.config.resolution.height}@${this.config.fps})`,
+      `Playlist Publish Worker started in RabbitMQ event mode (bucket=${this.config.playlistBucket}, ` +
+        `delivery=native-playlist)`,
     );
   }
 
-  /** Render exactly the playlist named in a RabbitMQ job. */
+  /** Publish exactly the playlist named in a RabbitMQ job. */
   async renderRequested(playlistId: string): Promise<void> {
     if (this.activeRender) {
-      throw new Error(`Cannot start render for ${playlistId}: another render is active`);
+      throw new Error(`Cannot publish ${playlistId}: another playlist publish is active`);
     }
 
     this.activeRender = this.doRenderRequested(playlistId);
@@ -88,7 +78,7 @@ export class PlaylistRenderService implements OnApplicationShutdown {
 
     const playlist = (await this.db.pollForChanges(playlistId))[0];
     if (!playlist) {
-      logger.info(`Playlist ${playlistId} does not need rendering; acknowledging job`);
+      logger.info(`Playlist ${playlistId} does not need publishing; acknowledging job`);
       return;
     }
 
@@ -98,7 +88,7 @@ export class PlaylistRenderService implements OnApplicationShutdown {
   private async renderPlaylist(pending: PendingPlaylist): Promise<void> {
     const startTime = Date.now();
     logger.info(
-      `Rendering playlist "${pending.name}" (${pending.id}, ${pending.itemCount} items)`,
+      `Publishing playlist "${pending.name}" (${pending.id}, ${pending.itemCount} items)`,
     );
 
     await this.db.markAsRendering(pending.id, pending.sourceHash);
@@ -118,61 +108,34 @@ export class PlaylistRenderService implements OnApplicationShutdown {
         );
       }
 
-      const items = await this.resolveItems(playlist);
+      const items = this.toNativePlaylistItems(playlist);
       if (items.length === 0) {
         throw new Error(
-          'No renderable items (all media missing, unsupported, or not READY)',
+          'No playable items (all media missing, unsupported, or not READY)',
         );
       }
 
-      const resolution = {
-        width: playlist.displayWidth,
-        height: playlist.displayHeight,
-      };
-      const rendered = await this.renderer.renderPlaylist(
-        pending.id,
-        items,
-        resolution,
-        playlist.zonesJson ?? undefined,
-      );
-
-      // Upload the finished video to the processed bucket BEFORE installing
-      // locally — a failed upload marks the render failed and retries without
-      // ever touching the player.
-      const s3Key = `playlists/${pending.id}.mp4`;
-      const s3Url = await this.s3.uploadFile(
-        this.config.processedBucket,
-        s3Key,
-        rendered.outputPath,
-        'video/mp4',
-      );
-
-      const installedSrc = await this.installIntoPlayer(
-        pending.id,
-        rendered.outputPath,
-      );
-      await this.updatePlayerConfig(pending.id, installedSrc, resolution);
+      await this.updatePlayerConfig(items);
 
       await this.db.markAsCompleted(
         pending.id,
         pending.sourceHash,
-        installedSrc,
-        rendered.durationSec,
-        s3Key,
-        s3Url,
+        null,
+        items.reduce((total, item) => total + Math.ceil((item.durationMs ?? 0) / 1000), 0),
+        '',
+        '',
       );
       await this.schedulerPublisher
         .publishRenderCompleted(pending.id)
         .catch((error) => {
           logger.warn(
-            `Render completed for ${pending.id}, but scheduler manifest refresh could not be queued: ${
+            `Playlist published for ${pending.id}, but scheduler manifest refresh could not be queued: ${
               error instanceof Error ? error.message : String(error)
             }`,
           );
         });
       logger.info(
-        `✓ Rendered "${pending.name}" → ${installedSrc} + s3://${this.config.processedBucket}/${s3Key} ` +
-          `(${resolution.width}x${resolution.height}, ${rendered.durationSec}s, ${Date.now() - startTime}ms)`,
+        `✓ Published native playlist "${pending.name}" (${items.length} item(s), ${Date.now() - startTime}ms)`,
       );
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -182,19 +145,37 @@ export class PlaylistRenderService implements OnApplicationShutdown {
   }
 
   /**
-   * Locate every item's media on local disk: files already synced by the
-   * media-sync worker are reused; anything else is downloaded from the media
-   * bucket by s3Key. Unusable items are skipped, not fatal.
+   * Convert playlist rows to the native Player playlist contract. The Player
+   * downloads and caches each URL, then plays the sequence locally.
    */
-  private async resolveItems(playlist: PlaylistJson): Promise<ResolvedItem[]> {
+  private toNativePlaylistItems(playlist: PlaylistJson): Array<{
+    id: string;
+    type: MediaKind;
+    src: string;
+    url: string;
+    muted: boolean;
+    fit: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
+    position: 'center' | 'top' | 'bottom' | 'left' | 'right';
+    width: number;
+    height: number;
+    durationMs?: number;
+  }> {
     const sorted = [...playlist.playlistItems].sort(
       (a, b) => a.position - b.position,
     );
-    const localPaths = await this.db.getLocalMediaPaths(
-      sorted.map((i) => i.mediaId),
-    );
 
-    const resolved: ResolvedItem[] = [];
+    const items: Array<{
+      id: string;
+      type: MediaKind;
+      src: string;
+      url: string;
+      muted: boolean;
+      fit: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
+      position: 'center' | 'top' | 'bottom' | 'left' | 'right';
+      width: number;
+      height: number;
+      durationMs?: number;
+    }> = [];
     for (const item of sorted) {
       if (item.media.status !== 'READY') {
         logger.warn(
@@ -211,39 +192,21 @@ export class PlaylistRenderService implements OnApplicationShutdown {
         continue;
       }
 
-      let localPath = localPaths.get(item.mediaId);
-      if (!localPath || !existsSync(localPath)) {
-        localPath = join(
-          this.config.scratchDir,
-          'sources',
-          item.mediaId,
-          item.media.filename,
-        );
-        if (!existsSync(localPath)) {
-          logger.info(
-            `Downloading ${item.media.filename} from s3://${this.config.mediaBucket}/${item.media.s3Key}`,
-          );
-          await this.s3.downloadFile(
-            this.config.mediaBucket,
-            item.media.s3Key,
-            localPath,
-          );
-        }
-      }
-
-      resolved.push({
-        mediaId: item.mediaId,
-        position: item.position,
-        durationSec: item.durationSec,
+      items.push({
+        id: item.id,
+        type: kind,
+        src: `media/${this.folderForKind(kind)}/${basename(item.media.filename).replace(/[/\\]/g, '_')}`,
+        url: this.s3.publicUrlFor(this.config.mediaBucket, item.media.s3Key),
+        muted: kind !== 'audio',
         fit: item.fit,
-        objectPosition: item.objectPosition,
-        zoneId: item.zoneId,
-        kind,
-        localPath,
+        position: item.objectPosition,
+        width: playlist.displayWidth,
+        height: playlist.displayHeight,
+        durationMs: kind === 'image' || kind === 'audio' ? item.durationSec * 1000 : undefined,
       });
     }
 
-    return resolved;
+    return items;
   }
 
   private detectKind(filename: string): MediaKind | null {
@@ -253,77 +216,30 @@ export class PlaylistRenderService implements OnApplicationShutdown {
     return null;
   }
 
-  /**
-   * Move the rendered MP4 into the player's media folder. Copy to a tmp name
-   * in the target dir, then rename — atomic on the player's filesystem, so
-   * the player never reads a torn file even mid-replace.
-   */
-  private async installIntoPlayer(
-    playlistId: string,
-    renderedPath: string,
-  ): Promise<string> {
-    const relativeSrc = `media/videos/playlist-${playlistId}.mp4`;
-
-    if (this.playerConfig.isRemote) {
-      const remoteSrc = await this.playerConfig.uploadMediaFile(
-        renderedPath,
-        'videos',
-        `playlist-${playlistId}.mp4`,
-      );
-      unlinkSync(renderedPath);
-      return remoteSrc;
-    }
-
-    const finalPath = join(this.config.playerRootPath, relativeSrc);
-    const tmpPath = `${finalPath}.tmp`;
-
-    copyFileSync(renderedPath, tmpPath);
-    renameSync(tmpPath, finalPath);
-    unlinkSync(renderedPath);
-
-    return relativeSrc;
+  private folderForKind(kind: MediaKind): 'videos' | 'images' | 'audio' {
+    if (kind === 'image') return 'images';
+    if (kind === 'audio') return 'audio';
+    return 'videos';
   }
 
-  private async updatePlayerConfig(
-    playlistId: string,
-    src: string,
-    resolution: { width: number; height: number },
-  ): Promise<void> {
-    const entry = {
-      id: playlistId,
-      type: 'video' as const,
-      src,
-      loop: true,
-      muted: false,
-      fit: 'scale-down' as const,
-      position: 'center' as const,
-      width: resolution.width,
-      height: resolution.height,
-    };
-
+  private async updatePlayerConfig(items: Parameters<PlayerConfigService['replacePlaylist']>[0]): Promise<void> {
     if (this.config.playerConfigMode === 'exclusive') {
-      await this.playerConfig.replacePlaylist([entry]);
+      await this.playerConfig.replacePlaylist(items);
     } else {
-      await this.playerConfig.addToPlaylist(entry);
+      for (const item of items) {
+        await this.playerConfig.addToPlaylist(item);
+      }
     }
   }
 
-  /** Playlists deleted in the CMS: remove the local MP4, the uploaded S3
-   *  copy, the player config entry, and the tracking row. */
+  /** Playlists deleted in the CMS: remove tracking. Native media assets are
+   * shared by playlists, so the Player cache owns asset cleanup. */
   private async cleanupDeletedPlaylists(): Promise<void> {
     const deleted = await this.db.findDeletedPlaylists();
 
-    for (const { playlistId, outputPath, s3Key } of deleted) {
+    for (const { playlistId, s3Key } of deleted) {
       logger.info(`Playlist ${playlistId} was deleted in the CMS, cleaning up`);
 
-      const src = outputPath ?? `media/videos/playlist-${playlistId}.mp4`;
-      const absolutePath = join(this.config.playerRootPath, src);
-
-      await this.playerConfig.removeFromPlaylist(src);
-      if (existsSync(absolutePath)) {
-        unlinkSync(absolutePath);
-        logger.info(`Removed ${absolutePath}`);
-      }
       if (s3Key) {
         await this.s3
           .deleteObject(this.config.processedBucket, s3Key)
