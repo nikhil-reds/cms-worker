@@ -331,6 +331,7 @@ export class SchedulerService implements OnApplicationShutdown {
             }
           : null,
       schedules: scheduleEntries,
+      playlists,
     };
     const contentHash = this.hashJson(manifestContent);
     const manifestState = await this.redis.getManifestState(deviceId);
