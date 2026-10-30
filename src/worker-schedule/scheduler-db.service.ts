@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
 import { createLogger } from '../common/logger';
+import { mapSensorTriggers, type SensorFlowRow, type SensorTrigger } from './sensor-triggers';
 
 const logger = createLogger('SchedulerDbService');
 
@@ -68,6 +69,7 @@ export interface PlaylistPlaybackManifest {
   canvas: { width: number; height: number };
   zones: PlaylistZone[];
   items: PlaylistPlaybackItem[];
+  sensorTriggers: SensorTrigger[];
 }
 
 /**
@@ -173,11 +175,47 @@ export class SchedulerDbService {
       this.mapPlaybackItem(row, zoneMap, zones[0]),
     );
 
+    const flowResult = await this.pool.query(`
+      SELECT
+        e.id,
+        s.playlist_id AS "playlistId",
+        e.playlist_id AS "edgePlaylistId",
+        e.source_node_id AS "sourceNodeId",
+        e.target_node_id AS "targetNodeId",
+        s.id AS "sensorId",
+        s.playlist_id AS "sensorPlaylistId",
+        s.kind AS "sensorKind",
+        s.name AS "sensorName",
+        s.x,
+        s.y,
+        s.connection_type AS "connectionType",
+        s.port,
+        to_jsonb(s)->>'serial_port' AS "serialPort",
+        s.operator,
+        s.expected_value AS "expectedValue",
+        s.enabled AS "sensorEnabled",
+        t.playlist_id AS "targetPlaylistId",
+        t.kind AS "targetKind",
+        t.playlist_item_id AS "targetPlaylistItemId",
+        pi.playlist_id AS "itemPlaylistId",
+        e.cooldown_ms AS "cooldownMs",
+        e.debounce_ms AS "debounceMs",
+        e.enabled AS "edgeEnabled"
+      FROM playlist_flow_nodes s
+      LEFT JOIN playlist_flow_edges e ON e.source_node_id = s.id
+      LEFT JOIN playlist_flow_nodes t ON t.id = e.target_node_id
+      LEFT JOIN playlist_items pi ON pi.id = t.playlist_item_id
+      WHERE s.playlist_id = $1 AND s.kind = 'SENSOR'
+      ORDER BY e.id
+    `, [playlistId]);
+    const sensorTriggers = mapSensorTriggers(playlistId, flowResult.rows as SensorFlowRow[], items);
+
     return {
       playlistId,
       canvas,
       zones,
       items,
+      sensorTriggers,
     };
   }
 

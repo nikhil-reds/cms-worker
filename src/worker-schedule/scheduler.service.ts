@@ -99,8 +99,11 @@ export class SchedulerService implements OnApplicationShutdown {
     let errorMessage: string | undefined;
 
     try {
+      if (job.reason === 'playlist.sensor.publish' && (!job.tenantId || !job.playlistId || !this.manifestPublisher.enabled)) {
+        throw new Error('Sensor publishing requires tenant, playlist and manifest storage');
+      }
       const result = this.manifestPublisher.enabled
-        ? await this.publishScheduleManifest('realtime_job')
+        ? await this.publishScheduleManifest('realtime_job', job.reason === 'playlist.sensor.publish' ? job : undefined)
         : await this.evaluateActiveSchedule('realtime_job');
       success = true;
       changed = result.changed;
@@ -219,12 +222,21 @@ export class SchedulerService implements OnApplicationShutdown {
    * schedules that target it, so content assigned to Screen 01 never reaches
    * Screen 02.
    */
-  private async publishScheduleManifest(source: 'realtime_job' | 'backup_tick'): Promise<{
+  private async publishScheduleManifest(source: 'realtime_job' | 'backup_tick', scope?: SchedulerEvaluateNowJob): Promise<{
     changed: boolean;
     activePlaylistId: string | null;
     activeScheduleId: string | null;
   }> {
-    const devices = await this.db.getTargetDevices();
+    // Optional deployment ownership boundary. Applies to both queue jobs and ticks.
+    // Every publisher sharing a manifest bucket must have disjoint ownership, or
+    // run the same sensor-capable release. This does not fence older publishers.
+    const configuredDevices = process.env.SCHEDULER_DEVICE_IDS;
+    const ownedDevices = configuredDevices === undefined ? null : new Set(
+      configuredDevices.split(',').map(id => id.trim()).filter(Boolean),
+    );
+    const devices = (await this.db.getTargetDevices()).filter(
+      device => ownedDevices === null || ownedDevices.has(device.id),
+    );
 
     if (devices.length === 0) {
       logger.warn(
@@ -243,10 +255,13 @@ export class SchedulerService implements OnApplicationShutdown {
     }
 
     let anyChanged = false;
+    const failedDevices: string[] = [];
     let firstActivePlaylistId: string | null = null;
     let firstActiveScheduleId: string | null = null;
 
     for (const device of devices) {
+      if (scope && device.tenantId !== scope.tenantId) continue;
+      if (scope && !(await this.db.getPublishedSchedules(device.id)).some(s => s.playlistId === scope.playlistId)) continue;
       try {
         const result = await this.publishScheduleManifestForDevice(device.id, source);
         if (result.changed) anyChanged = true;
@@ -258,7 +273,12 @@ export class SchedulerService implements OnApplicationShutdown {
           `source=${source} Failed to publish manifest for device ${device.id} (${device.name}): %s`,
           error instanceof Error ? error.message : String(error),
         );
+        failedDevices.push(device.id);
       }
+    }
+
+    if (failedDevices.length > 0) {
+      throw new Error(`Manifest publication failed for device(s): ${failedDevices.join(', ')}`);
     }
 
     return {
@@ -280,16 +300,33 @@ export class SchedulerService implements OnApplicationShutdown {
     const playlistIds = [...new Set(schedules.map((schedule) => schedule.playlistId))];
     const playlists = await Promise.all(playlistIds.map(async (playlistId) => {
       const playbackManifest = await this.db.getPlaylistPlaybackManifest(playlistId);
-      const playlistVersion = this.playlistVersionFor(playbackManifest);
+      const hasSensorFlow = playbackManifest.sensorTriggers.length > 0;
+      if (hasSensorFlow && process.env.SENSOR_MANIFEST_V4_ENABLED !== 'true') {
+        throw new Error(
+          `Playlist ${playlistId} has GPIO sensors, but SENSOR_MANIFEST_V4_ENABLED is not true`,
+        );
+      }
+      if (hasSensorFlow && !this.playerWebSocketGateway.supportsSensorTriggers(deviceId)) {
+        throw new Error(`Device ${deviceId} must connect with playlist-v4 and a supported sensor adapter before sensor publication`);
+      }
+      const playlistVersion = this.playlistVersionFor(hasSensorFlow
+        ? playbackManifest
+        : {
+            playlistId: playbackManifest.playlistId,
+            canvas: playbackManifest.canvas,
+            zones: playbackManifest.zones,
+            items: playbackManifest.items,
+          });
       await this.manifestPublisher.publishPlaylist({
-        schemaVersion: 3,
+        schemaVersion: hasSensorFlow ? 4 : 3,
         playlistId,
         playlistVersion,
         revision: playlistVersion,
-        serverNow: new Date().toISOString(),
+        ...(hasSensorFlow ? {} : { serverNow: new Date().toISOString() }),
         canvas: playbackManifest.canvas,
         zones: playbackManifest.zones,
         items: playbackManifest.items,
+        ...(hasSensorFlow ? { sensorTriggers: playbackManifest.sensorTriggers } : {}),
       });
 
       return {
@@ -298,6 +335,7 @@ export class SchedulerService implements OnApplicationShutdown {
         canvas: playbackManifest.canvas,
         zones: playbackManifest.zones,
         items: playbackManifest.items,
+        ...(hasSensorFlow ? { sensorTriggers: playbackManifest.sensorTriggers } : {}),
       };
     }));
 
@@ -333,7 +371,8 @@ export class SchedulerService implements OnApplicationShutdown {
       schedules: scheduleEntries,
       playlists,
     };
-    const contentHash = this.hashJson(manifestContent);
+    const { serverNow: _serverNow, ...stableContent } = manifestContent;
+    const contentHash = this.hashJson(stableContent);
     const manifestState = await this.redis.getManifestState(deviceId);
 
     if (manifestState?.contentHash === contentHash) {

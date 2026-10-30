@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { createLogger } from '../common/logger';
+import type { SensorTrigger } from './sensor-triggers';
 
 const logger = createLogger('ManifestPublisherService');
 
@@ -69,7 +70,7 @@ export interface PlayerManifestPlaylistRef {
 }
 
 export interface PlaylistManifest {
-  schemaVersion: 3;
+  schemaVersion: 3 | 4;
   playlistId: string;
   playlistVersion: string;
   revision: string;
@@ -77,6 +78,7 @@ export interface PlaylistManifest {
   canvas?: PlayerManifestCanvas;
   zones?: PlayerManifestZone[];
   items: PlayerManifestItem[];
+  sensorTriggers?: SensorTrigger[];
 }
 
 @Injectable()
@@ -92,6 +94,7 @@ export class ManifestPublisherService {
     private readonly keyPrefix = 'manifests',
   ) {
     this.s3Client = new S3Client({
+      ...(process.env.S3_ENDPOINT_URL ? { endpoint: process.env.S3_ENDPOINT_URL, forcePathStyle: true } : {}),
       region,
       credentials: { accessKeyId, secretAccessKey },
     });

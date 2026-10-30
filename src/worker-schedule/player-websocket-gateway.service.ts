@@ -13,6 +13,7 @@ interface PlayerSocketState {
   connectedAt: string;
   lastPongAt: number;
   socket: WebSocket;
+  sensorV4?: boolean;
 }
 
 interface ManifestUpdatedMessage {
@@ -136,6 +137,11 @@ export class PlayerWebSocketGatewayService implements OnApplicationShutdown {
     return this.notifyIndex(this.groups, groupId, message);
   }
 
+  supportsSensorTriggers(deviceId: string): boolean {
+    const state = this.players.get(deviceId);
+    return Boolean(state?.sensorV4 && state.socket.readyState === state.socket.OPEN);
+  }
+
   metrics(): { connectedPlayers: number; deviceIds: string[] } {
     return {
       connectedPlayers: this.players.size,
@@ -173,7 +179,16 @@ export class PlayerWebSocketGatewayService implements OnApplicationShutdown {
     });
 
     socket.on('message', (raw) => {
-      logger.info(`Player ${deviceId} message: ${raw.toString()}`);
+      if (this.players.get(deviceId)?.socket !== socket) return;
+      try {
+        const message = JSON.parse(raw.toString());
+        if (message.type === 'player.capabilities') {
+          state.sensorV4 = message.playlistSchemas?.includes(4) === true && ['mock', 'nexmosphere'].includes(message.sensorAdapter);
+          logger.info(`Player ${deviceId} sensor capability: ${state.sensorV4}`);
+        } else {
+          logger.info(`Player ${deviceId} message: ${raw.toString()}`);
+        }
+      } catch { logger.warn(`Invalid player message from ${deviceId}`); }
     });
 
     socket.on('close', () => {
