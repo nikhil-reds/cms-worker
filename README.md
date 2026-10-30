@@ -263,6 +263,13 @@ device manifest, derives `/playlists/{playlistId}/v{playlistVersion}.json`,
 downloads the individual media assets locally, verifies size/hash when present,
 and switches playback only after the required files are cached.
 
+GPIO sensor playlists use schema v4 and include `sensorTriggers` alongside the
+normal `items`. Set `SENSOR_MANIFEST_V4_ENABLED=true` only when targeted players
+support the v4 trigger contract. With the flag off, an assigned sensor playlist
+fails publication and the previous device pointer remains in place. Ordinary
+playlists continue to publish as schema v3. The CMS sensor publish gate must be
+removed separately after player support is deployed.
+
 Healthy startup logs look like:
 
 ```
@@ -382,3 +389,31 @@ DELETE FROM player_media_sync WHERE media_id = '<id>';
 - **Why a separate `player_media_sync` table?** The CMS schema is Prisma-managed; adding columns to `media` would fight its migrations. A side-table keeps the worker fully decoupled — dropping it removes every trace of the worker.
 - **Idempotency:** the poll query only returns unsynced/retryable rows, an in-process map prevents duplicate concurrent syncs of the same file, and playlist entries are deduped by `src`. Restarting the worker at any point is safe.
 - **Atomic config writes:** `config.json` is written to a temp file then renamed, so the player can never observe a truncated JSON file.
+
+
+## Publisher ownership and sensor rollout
+
+The CMS and scheduler use the normal scheduler.evaluate.now queue and
+manifests/{deviceId}.json path for sensor playlists too. Set RABBITMQ_ENABLED=true
+and SENSOR_MANIFEST_V4_ENABLED=true on the participating services. The player must
+connect with playlist-v4 and mock-adapter capabilities for the current mock rollout.
+
+An optional SCHEDULER_DEVICE_IDS comma-separated allowlist restricts this worker's
+device-manifest publication for both queue jobs and backup ticks. Unset retains
+all-device publishing; an explicitly empty value publishes no devices. For example:
+
+    SCHEDULER_DEVICE_IDS=70168ca1-0ea7-4deb-a565-c62dcf91c94d
+
+This is a deployment ownership boundary, not a distributed lock. All publishers
+using the same bucket/key must be upgraded to the sensor-capable release, or have
+disjoint device ownership. An older publisher ignores this setting and can still
+replace a v4 reference with a sensor-free version. Do not fix that by making the
+player retain deleted rules: it would prevent intentional rule removal.
+
+Before declaring a rollout successful, test CMS publication, natural completion of
+the triggered video, resume at the interrupted position, and rule stability over
+at least two 60-second publisher ticks. The player repository's
+scripts/verify-live-sensor.cjs accepts SENSOR_TEST_STABILITY_MS=130000 and
+SENSOR_TEST_REPORT for a separate report file. Run it while the named mock test
+schedule is active and the RAMAYANA video is playing. A stability failure means
+the publishing conflict remains even if the first trigger/resume succeeds.

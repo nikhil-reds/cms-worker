@@ -125,6 +125,7 @@ export class PlaylistDbService {
       FROM fingerprints f
       LEFT JOIN player_playlist_render r ON r.playlist_id = f.id
       WHERE f."itemCount" > 0
+        AND NOT EXISTS (SELECT 1 FROM playlist_flow_nodes n WHERE n.playlist_id = f.id AND n.kind = 'SENSOR')
         AND ($2::text IS NULL OR f.id = $2)
         AND (
           r.playlist_id IS NULL
@@ -372,3 +373,4 @@ export class PlaylistDbService {
     logger.info('Database connection closed');
   }
 }
+
