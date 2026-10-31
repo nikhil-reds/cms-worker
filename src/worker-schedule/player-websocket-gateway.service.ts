@@ -14,6 +14,7 @@ interface PlayerSocketState {
   lastPongAt: number;
   socket: WebSocket;
   sensorV4?: boolean;
+  sensorV5?: boolean;
 }
 
 interface ManifestUpdatedMessage {
@@ -137,9 +138,9 @@ export class PlayerWebSocketGatewayService implements OnApplicationShutdown {
     return this.notifyIndex(this.groups, groupId, message);
   }
 
-  supportsSensorTriggers(deviceId: string): boolean {
+  supportsSensorTriggers(deviceId: string, schemaVersion: 4 | 5 = 4): boolean {
     const state = this.players.get(deviceId);
-    return Boolean(state?.sensorV4 && state.socket.readyState === state.socket.OPEN);
+    return Boolean(state && (schemaVersion === 5 ? state.sensorV5 : state.sensorV4) && state.socket.readyState === state.socket.OPEN);
   }
 
   metrics(): { connectedPlayers: number; deviceIds: string[] } {
@@ -181,10 +182,15 @@ export class PlayerWebSocketGatewayService implements OnApplicationShutdown {
     socket.on('message', (raw) => {
       if (this.players.get(deviceId)?.socket !== socket) return;
       try {
-        const message = JSON.parse(raw.toString());
-        if (message.type === 'player.capabilities') {
-          state.sensorV4 = message.playlistSchemas?.includes(4) === true && ['mock', 'nexmosphere'].includes(message.sensorAdapter);
-          logger.info(`Player ${deviceId} sensor capability: ${state.sensorV4}`);
+        const message: unknown = JSON.parse(raw.toString());
+        if (!message || typeof message !== 'object') throw new Error('Invalid player message');
+        const capabilities = message as Record<string, unknown>;
+        if (capabilities.type === 'player.capabilities') {
+          const sensorAdapter = capabilities.sensorAdapter === 'mock' || capabilities.sensorAdapter === 'nexmosphere';
+          const schemas: unknown[] = Array.isArray(capabilities.playlistSchemas) ? capabilities.playlistSchemas as unknown[] : [];
+          state.sensorV4 = sensorAdapter && schemas.includes(4);
+          state.sensorV5 = sensorAdapter && schemas.includes(5);
+          logger.info(`Player ${deviceId} sensor capability: v4=${state.sensorV4} v5=${state.sensorV5}`);
         } else {
           logger.info(`Player ${deviceId} message: ${raw.toString()}`);
         }

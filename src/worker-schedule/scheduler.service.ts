@@ -301,13 +301,18 @@ export class SchedulerService implements OnApplicationShutdown {
     const playlists = await Promise.all(playlistIds.map(async (playlistId) => {
       const playbackManifest = await this.db.getPlaylistPlaybackManifest(playlistId);
       const hasSensorFlow = playbackManifest.sensorTriggers.length > 0;
-      if (hasSensorFlow && process.env.SENSOR_MANIFEST_V4_ENABLED !== 'true') {
+      const hasMessageFlow = playbackManifest.sensorTriggers.some(trigger => trigger.transport === 'serial-message');
+      const playlistSchemaVersion: 3 | 4 | 5 = hasMessageFlow ? 5 : hasSensorFlow ? 4 : 3;
+      if (playlistSchemaVersion === 4 && process.env.SENSOR_MANIFEST_V4_ENABLED !== 'true') {
         throw new Error(
           `Playlist ${playlistId} has GPIO sensors, but SENSOR_MANIFEST_V4_ENABLED is not true`,
         );
       }
-      if (hasSensorFlow && !this.playerWebSocketGateway.supportsSensorTriggers(deviceId)) {
-        throw new Error(`Device ${deviceId} must connect with playlist-v4 and a supported sensor adapter before sensor publication`);
+      if (playlistSchemaVersion === 5 && process.env.SENSOR_MANIFEST_V5_ENABLED !== 'true') {
+        throw new Error(`Playlist ${playlistId} has controller-message sensors, but SENSOR_MANIFEST_V5_ENABLED is not true`);
+      }
+      if (hasSensorFlow && !this.playerWebSocketGateway.supportsSensorTriggers(deviceId, hasMessageFlow ? 5 : 4)) {
+        throw new Error(`Device ${deviceId} must connect with playlist-v${playlistSchemaVersion} and a supported sensor adapter before sensor publication`);
       }
       const playlistVersion = this.playlistVersionFor(hasSensorFlow
         ? playbackManifest
@@ -318,7 +323,7 @@ export class SchedulerService implements OnApplicationShutdown {
             items: playbackManifest.items,
           });
       await this.manifestPublisher.publishPlaylist({
-        schemaVersion: hasSensorFlow ? 4 : 3,
+        schemaVersion: playlistSchemaVersion,
         playlistId,
         playlistVersion,
         revision: playlistVersion,
