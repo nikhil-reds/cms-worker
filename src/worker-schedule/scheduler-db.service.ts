@@ -81,7 +81,7 @@ export class SchedulerDbService {
   private pool: Pool;
   private closed = false;
 
-  constructor(databaseUrl: string) {
+  constructor(databaseUrl: string, private readonly mediaCdnBaseUrl = '') {
     this.pool = new Pool({
       connectionString: databaseUrl,
       application_name: 'cms-worker-scheduler',
@@ -155,6 +155,7 @@ export class SchedulerDbService {
         COALESCE(pi.zone_id, 'full-screen') AS "zoneId",
         m.filename,
         m.cdn_url AS "cdnUrl",
+        m.s3_key AS "s3Key",
         m.size_bytes AS "sizeBytes",
         m.updated_at AS "mediaUpdatedAt",
         COALESCE(m.source_type, 'upload') AS "sourceType",
@@ -326,6 +327,7 @@ export class SchedulerDbService {
     zoneId: string | null;
     filename: string;
     cdnUrl: string | null;
+    s3Key: string | null;
     sourceType: string;
     externalUrl: string | null;
     width: number | null;
@@ -343,7 +345,16 @@ export class SchedulerDbService {
       : type === 'html'
         ? `media/html/${row.id}/index.html`
         : `media/${this.folderForType(type)}/${String(row.filename).replace(/[/\\]/g, '_')}`;
-    const url = sourceType === 'external_url' ? row.externalUrl || src : row.cdnUrl || undefined;
+    const mediaCdn = this.mediaCdnBaseUrl.trim().replace(/\/+$/, '');
+    const cdnKey = row.s3Key?.replace(/^\/+/, '')
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/');
+    const url = sourceType === 'external_url'
+      ? row.externalUrl || src
+      : mediaCdn && cdnKey
+        ? `${mediaCdn}/${cdnKey}`
+        : row.cdnUrl || undefined;
 
     return {
       id: row.id,

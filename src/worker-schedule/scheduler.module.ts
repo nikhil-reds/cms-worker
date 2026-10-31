@@ -34,7 +34,7 @@ const REDPANDA_BROKERS = (process.env.REDPANDA_BROKERS || 'localhost:29092')
   providers: [
     {
       provide: SchedulerDbService,
-      useFactory: () => new SchedulerDbService(process.env.DATABASE_URL || ''),
+      useFactory: () => new SchedulerDbService(process.env.DATABASE_URL || '', PLAYER_CDN_URL),
     },
     {
       provide: PlayerConfigService,

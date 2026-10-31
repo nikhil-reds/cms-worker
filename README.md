@@ -263,6 +263,14 @@ device manifest, derives `/playlists/{playlistId}/v{playlistVersion}.json`,
 downloads the individual media assets locally, verifies size/hash when present,
 and switches playback only after the required files are cached.
 
+For uploaded media, set `PLAYER_CDN_URL` to the CloudFront distribution that can
+read the media bucket (for example,
+`PLAYER_CDN_URL=https://d1zue4w6hf1jx0.cloudfront.net`). The scheduler builds
+each download URL from this base and `media.s3_key`. This avoids publishing a
+direct private S3 URL stored in `media.cdn_url`; external media URLs are kept as
+provided. Verify a representative CloudFront media URL returns HTTP 200 from a
+player before restarting the scheduler.
+
 GPIO sensor playlists use schema v4 and include `sensorTriggers` alongside the
 normal `items`. Set `SENSOR_MANIFEST_V4_ENABLED=true` only when targeted players
 support the v4 trigger contract. With the flag off, an assigned sensor playlist
