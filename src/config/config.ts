@@ -78,6 +78,7 @@ const EnvSchema = z.object({
   PLAYER_MANIFEST_PUBLIC_BASE_URL: z.string().url().optional(),
   PLAYER_MANIFEST_PREFIX: z.string().default('manifests'),
   SENSOR_MANIFEST_V4_ENABLED: z.enum(['true', 'false']).default('false'),
+  SENSOR_MANIFEST_V5_ENABLED: z.enum(['true', 'false']).default('false'),
   PLAYER_WS_ENABLED: z.coerce.boolean().default(false),
   PLAYER_WS_PORT: z.coerce.number().int().positive().default(3031),
   PLAYER_WS_PATH: z.string().default('/ws/player'),

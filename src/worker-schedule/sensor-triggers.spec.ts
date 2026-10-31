@@ -41,4 +41,43 @@ describe('mapSensorTriggers', () => {
     expect(() => mapSensorTriggers('playlist-1', [row, { ...row, id: 'edge-2' }], [item]))
       .toThrow('multiple targets');
   });
+
+  const messageRow: SensorFlowRow = {
+    ...row, id: 'edge-rfid', sensorId: 'sensor-rfid', sourceNodeId: 'sensor-rfid',
+    sensorName: 'RFID tag 001', serialPort: 'COM4', port: null,
+    expectedValue: null, matchMode: 'exact', matchValue: 'XR[PU001]',
+  };
+
+  it('maps a complete controller message without changing a legacy button rule', () => {
+    const triggers = mapSensorTriggers('playlist-1', [row, messageRow], [item]);
+    expect(triggers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ transport: 'gpio', port: '17', value: true }),
+      expect.objectContaining({ transport: 'serial-message', serialPort: 'COM4', matchMode: 'exact', matchValue: 'XR[PU001]', targetPlaylistItemId: 'item-1' }),
+    ]));
+    expect(triggers).toHaveLength(2);
+  });
+
+  it.each([
+    [{ matchMode: null }, 'unsupported serial message'],
+    [{ matchValue: 'XR[PU001]\n' }, 'unsupported serial message'],
+    [{ matchValue: ' XR[PU001]' }, 'unsupported serial message'],
+    [{ serialPort: null }, 'unsupported serial message'],
+    [{ port: '17' }, 'unsupported serial message'],
+  ] as const)('rejects invalid message rule %j', (change, reason) => {
+    expect(() => mapSensorTriggers('playlist-1', [{ ...messageRow, ...change }], [item]))
+      .toThrow(reason);
+  });
+
+  it('rejects duplicate messages on the same controller but accepts different tags', () => {
+    const duplicate = { ...messageRow, id: 'edge-rfid-2', sensorId: 'sensor-rfid-2', sourceNodeId: 'sensor-rfid-2' };
+    expect(() => mapSensorTriggers('playlist-1', [messageRow, duplicate], [item]))
+      .toThrow('duplicate sensor condition');
+    expect(mapSensorTriggers('playlist-1', [messageRow, { ...duplicate, matchValue: 'XR[PU002]' }], [item]))
+      .toHaveLength(2);
+  });
+
+  it('rejects two active controller ports in one playlist', () => {
+    expect(() => mapSensorTriggers('playlist-1', [{ ...row, serialPort: 'COM3' }, messageRow], [item]))
+      .toThrow('one controller serial port');
+  });
 });

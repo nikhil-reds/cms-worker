@@ -70,7 +70,7 @@ export interface PlayerManifestPlaylistRef {
 }
 
 export interface PlaylistManifest {
-  schemaVersion: 3 | 4;
+  schemaVersion: 3 | 4 | 5;
   playlistId: string;
   playlistVersion: string;
   revision: string;

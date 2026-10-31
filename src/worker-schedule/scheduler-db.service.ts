@@ -193,6 +193,8 @@ export class SchedulerDbService {
         to_jsonb(s)->>'serial_port' AS "serialPort",
         s.operator,
         s.expected_value AS "expectedValue",
+        to_jsonb(s)->>'match_mode' AS "matchMode",
+        to_jsonb(s)->>'match_value' AS "matchValue",
         s.enabled AS "sensorEnabled",
         t.playlist_id AS "targetPlaylistId",
         t.kind AS "targetKind",
